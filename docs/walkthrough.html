@@ -1,0 +1,1214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cmdq — a walkthrough</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --bg2: #161b22;
+    --bg3: #1f2530;
+    --line: #2a313c;
+    --fg: #d7dde6;
+    --fg2: #9aa3b2;
+    --accent: #ffb454;
+    --accent2: #7ee787;
+    --accent3: #79c0ff;
+    --bad: #ff7b72;
+    --warn: #f0883e;
+    --ok: #56d364;
+    --code-bg: #0a0d12;
+    --shadow: 0 1px 0 rgba(255,255,255,0.04), 0 8px 24px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 64px 24px 160px;
+  }
+  header.hero {
+    border-left: 4px solid var(--accent);
+    padding: 8px 0 8px 24px;
+    margin-bottom: 56px;
+  }
+  header.hero .eyebrow {
+    color: var(--accent);
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  header.hero h1 {
+    font-size: 56px;
+    line-height: 1.05;
+    margin: 8px 0 12px;
+    letter-spacing: -0.02em;
+  }
+  header.hero p.lede {
+    font-size: 19px;
+    color: var(--fg2);
+    margin: 0;
+    max-width: 720px;
+  }
+  nav.toc {
+    background: var(--bg2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin: 0 0 56px;
+    box-shadow: var(--shadow);
+  }
+  nav.toc strong {
+    display: block;
+    color: var(--fg2);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  nav.toc ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: toc;
+    columns: 2;
+    column-gap: 28px;
+  }
+  nav.toc li {
+    counter-increment: toc;
+    margin: 4px 0;
+    break-inside: avoid;
+  }
+  nav.toc li::before {
+    content: counter(toc, decimal-leading-zero) " ";
+    color: var(--accent);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    margin-right: 8px;
+  }
+  nav.toc a { color: var(--fg); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+
+  section { margin: 0 0 80px; }
+  h2 {
+    font-size: 32px;
+    letter-spacing: -0.01em;
+    margin: 0 0 20px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  h2 .num {
+    color: var(--accent);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 14px;
+    margin-right: 16px;
+    vertical-align: 6px;
+    letter-spacing: 0.1em;
+  }
+  h3 {
+    font-size: 21px;
+    margin: 36px 0 12px;
+    color: var(--fg);
+  }
+  h4 {
+    font-size: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg2);
+    margin: 24px 0 10px;
+  }
+  p { margin: 12px 0; }
+  p.note { color: var(--fg2); font-size: 14px; }
+
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin: 16px 0;
+    box-shadow: var(--shadow);
+  }
+  .card h4 { margin-top: 0; }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(90deg, rgba(255,180,84,0.08), rgba(255,180,84,0));
+    padding: 14px 18px;
+    border-radius: 0 6px 6px 0;
+    margin: 18px 0;
+  }
+  .callout.insight { border-color: var(--accent2); background: linear-gradient(90deg, rgba(126,231,135,0.08), rgba(126,231,135,0)); }
+  .callout.warn    { border-color: var(--warn); background: linear-gradient(90deg, rgba(240,136,62,0.08), rgba(240,136,62,0)); }
+  .callout.bad     { border-color: var(--bad);  background: linear-gradient(90deg, rgba(255,123,114,0.08), rgba(255,123,114,0)); }
+  .callout strong { color: var(--accent); }
+  .callout.insight strong { color: var(--accent2); }
+  .callout.warn strong { color: var(--warn); }
+  .callout.bad strong { color: var(--bad); }
+
+  pre, code {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13.5px;
+  }
+  code {
+    background: var(--bg3);
+    color: var(--accent3);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--fg);
+    padding: 16px 18px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    overflow-x: auto;
+    line-height: 1.5;
+    margin: 14px 0;
+  }
+  pre code { background: transparent; padding: 0; color: inherit; font-size: inherit; }
+  pre .k { color: #ff7b72; }   /* keyword */
+  pre .s { color: #a5d6ff; }   /* string */
+  pre .c { color: #6e7681; font-style: italic; } /* comment */
+  pre .t { color: #ffa657; }   /* type */
+  pre .n { color: #d2a8ff; }   /* number */
+  pre .f { color: #79c0ff; }   /* fn name */
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 18px 0;
+    background: var(--bg2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td {
+    padding: 12px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--line);
+    font-size: 14px;
+    vertical-align: top;
+  }
+  th { background: var(--bg3); color: var(--fg2); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+  tr:last-child td { border-bottom: none; }
+  td .yes { color: var(--ok); font-weight: 600; }
+  td .no  { color: var(--bad); font-weight: 600; }
+  td .meh { color: var(--warn); font-weight: 600; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; }
+  @media (max-width: 800px) {
+    .grid2, .grid3 { grid-template-columns: 1fr; }
+    nav.toc ol { columns: 1; }
+    header.hero h1 { font-size: 38px; }
+  }
+
+  svg { display: block; max-width: 100%; height: auto; }
+  figure {
+    margin: 22px 0;
+    background: var(--bg2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 22px;
+    box-shadow: var(--shadow);
+  }
+  figcaption {
+    color: var(--fg2);
+    font-size: 13px;
+    margin-top: 12px;
+    text-align: center;
+  }
+
+  /* Terminal mock */
+  .term {
+    background: #0a0d12;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 16px 0;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .term .bar {
+    background: #161b22;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .term .dot { width: 11px; height: 11px; border-radius: 50%; background: #444; }
+  .term .dot.r { background: #ff5f57; }
+  .term .dot.y { background: #febc2e; }
+  .term .dot.g { background: #28c840; }
+  .term .body { padding: 14px 16px; color: #c9d1d9; white-space: pre; }
+  .term .body .prompt { color: var(--accent2); }
+  .term .body .typed { color: var(--accent); }
+  .term .body .out { color: #8b949e; }
+  .term .body .sep { color: var(--fg2); }
+  .term .body .panel { color: var(--accent3); }
+  .term .body .err { color: var(--bad); }
+
+  .pill {
+    display: inline-block;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 100px;
+    background: var(--bg3);
+    color: var(--fg2);
+    border: 1px solid var(--line);
+    letter-spacing: 0.05em;
+  }
+  .pill.ok { color: var(--ok); border-color: rgba(86,211,100,0.3); }
+  .pill.bad { color: var(--bad); border-color: rgba(255,123,114,0.3); }
+  .pill.warn { color: var(--warn); border-color: rgba(240,136,62,0.3); }
+
+  .lessons { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .lessons .lesson {
+    background: var(--bg2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent2);
+    padding: 14px 16px;
+    border-radius: 0 6px 6px 0;
+  }
+  .lessons .lesson h5 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    color: var(--accent2);
+    font-family: "JetBrains Mono", monospace;
+    letter-spacing: 0.04em;
+  }
+  .lessons .lesson p { margin: 0; font-size: 14px; color: var(--fg2); }
+  @media (max-width: 800px) { .lessons { grid-template-columns: 1fr; } }
+
+  hr { border: none; border-top: 1px solid var(--line); margin: 60px 0; }
+
+  footer {
+    color: var(--fg2);
+    font-size: 13px;
+    text-align: center;
+    padding: 24px 0;
+  }
+
+  /* SVG default text styling */
+  svg text { fill: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; font-size: 13px; }
+  svg .mono { font-family: "JetBrains Mono", monospace; font-size: 12px; }
+  svg .dim  { fill: var(--fg2); }
+  svg .accent { fill: var(--accent); }
+  svg .accent2 { fill: var(--accent2); }
+  svg .accent3 { fill: var(--accent3); }
+  svg .stroke { stroke: var(--line); fill: none; }
+  svg .stroke-fg { stroke: var(--fg); fill: none; }
+  svg .stroke-accent { stroke: var(--accent); fill: none; }
+  svg .stroke-accent2 { stroke: var(--accent2); fill: none; }
+  svg .box { fill: var(--bg3); stroke: var(--line); stroke-width: 1; }
+  svg .box-hi { fill: #221a0c; stroke: var(--accent); stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">A walkthrough</div>
+  <h1>cmdq</h1>
+  <p class="lede">A small terminal wrapper that lets you type the <em>next</em> command while one is still running. This document walks through the problem, the options ruled out, the architecture, and the lessons — both Rust-specific and general — that came out of building it.</p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#problem">The problem</a></li>
+    <li><a href="#options">Options weighed</a></li>
+    <li><a href="#architecture">Architecture in one diagram</a></li>
+    <li><a href="#pty">Hosting the shell in a PTY</a></li>
+    <li><a href="#osc133">OSC 133: knowing what the shell is doing</a></li>
+    <li><a href="#render">Rendering: vt100 inside ratatui</a></li>
+    <li><a href="#queue">Queue model & dispatch</a></li>
+    <li><a href="#integration">Shell integration without surgery</a></li>
+    <li><a href="#ux">UX polish: alt-screen, SIGINT, discoverability</a></li>
+    <li><a href="#eventloop">The event loop, end to end</a></li>
+    <li><a href="#testing">Test strategy</a></li>
+    <li><a href="#rust">Rust-specific lessons</a></li>
+    <li><a href="#general">General software lessons</a></li>
+  </ol>
+</nav>
+
+<!-- ================================================================ -->
+<section id="problem">
+<h2><span class="num">01</span>The problem</h2>
+
+<p>In a normal terminal, the running command holds the TTY. So while it runs:</p>
+
+<div class="grid3">
+  <div class="card"><h4>Invisible typing</h4><p>You can't see the next command you're typing — bytes fall into the running command's stdin or smear across its output.</p></div>
+  <div class="card"><h4>No edit / cancel</h4><p>If you typed it wrong, you can't fix it. There's no place to fix it <em>in</em>.</p></div>
+  <div class="card"><h4>No queueing</h4><p>If you have three commands lined up, you have to babysit each finish.</p></div>
+</div>
+
+<div class="term">
+  <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:8px;color:#8b949e;font-size:12px">before — your shell, naked</span></div>
+  <div class="body"><span class="prompt">$ </span><span class="typed">npm run build</span>
+<span class="out">building... [████████░░░░░░░░] 47%</span>
+<span class="out">npm warn deprecated foo@1.2.3</span>
+<span class="typed">git st<span class="err">←</span> goes... where?  is it being typed? did 'g' just</span>
+<span class="out">building... [██████████░░░░░░] 62%   abort the build? you can't tell</span></div>
+</div>
+
+<div class="callout insight">
+  <strong>The framing.</strong> The shell can't help you here — it has handed the foreground job control of the TTY. So the fix has to live <em>above</em> the shell, at a layer that still owns the screen and keyboard while the shell's child runs.
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="options">
+<h2><span class="num">02</span>Options weighed</h2>
+
+<p>Four serious approaches were on the table. Three are dead ends because of where they sit in the I/O stack.</p>
+
+<table>
+  <thead><tr><th style="width:22%">Approach</th><th>What it tries</th><th>Why it fails</th><th style="width:14%">Verdict</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>zsh / OhMyZsh plugin</strong><br><span class="pill">shell-only</span></td>
+      <td>Hook <code>preexec</code>/<code>precmd</code>; render a "type the next thing" UI from inside the shell.</td>
+      <td>While a foreground command runs, the shell process is <em>blocked</em>. It can't read keystrokes or paint anything — the kernel has handed the TTY's foreground process group to the running command. Plugins literally cannot do this.</td>
+      <td><span class="no">No</span></td>
+    </tr>
+    <tr>
+      <td><strong>readline / zle hook</strong><br><span class="pill">line-editor</span></td>
+      <td>Override the line editor to remember "second command".</td>
+      <td>Same problem. zle is only alive when zsh has the prompt back.</td>
+      <td><span class="no">No</span></td>
+    </tr>
+    <tr>
+      <td><strong>tmux command-prompt</strong><br><span class="pill">multiplexer</span></td>
+      <td>Use tmux's <code>command-prompt</code> binding to enter text.</td>
+      <td>Works, but: (a) requires tmux, (b) can't inject the typed bytes back into the running pane's shell at the right moment, (c) doesn't show a queue, (d) doesn't handle conditional chaining.</td>
+      <td><span class="meh">Partial</span></td>
+    </tr>
+    <tr>
+      <td><strong>PTY wrapper</strong><br><span class="pill ok">winning</span></td>
+      <td>A separate process spawns the user's shell in a pseudo-terminal. The wrapper owns the real TTY: it draws, it reads keys. It forwards bytes to the inner shell as needed.</td>
+      <td>Nothing — this is the layer that has both the screen and the keyboard. It only needs to know <em>when</em> the shell is at a prompt vs running a command.</td>
+      <td><span class="yes">Yes</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout insight">
+  <strong>Reusable insight.</strong> When a layer "can't" do the thing you want, ask whether the constraint is fundamental or whether you can move <em>up one layer</em>. Wrapper-around-the-thing is a recurring pattern: tmux wraps shells, screen wraps shells, debuggers wrap processes, containers wrap processes, IDE terminals wrap shells. All of these exist because the wrapped layer is busy and the wrapping layer is the one that can keep responding.
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="architecture">
+<h2><span class="num">03</span>Architecture in one diagram</h2>
+
+<figure>
+<svg viewBox="0 0 920 460" role="img" aria-label="Architecture diagram">
+  <!-- Outer terminal -->
+  <rect x="20" y="20" width="880" height="420" rx="10" class="box"/>
+  <text x="40" y="45" class="dim mono">your terminal (iTerm / Ghostty / Alacritty …)</text>
+
+  <!-- cmdq box -->
+  <rect x="60" y="70" width="800" height="350" rx="8" class="box-hi"/>
+  <text x="80" y="98" class="accent mono">cmdq (the binary you launch)</text>
+
+  <!-- crossterm -->
+  <rect x="90" y="120" width="220" height="80" rx="6" class="box"/>
+  <text x="105" y="145" class="accent3 mono">crossterm</text>
+  <text x="105" y="168" class="dim">raw mode + alt-screen</text>
+  <text x="105" y="186" class="dim">key events in</text>
+
+  <!-- ratatui -->
+  <rect x="340" y="120" width="240" height="80" rx="6" class="box"/>
+  <text x="355" y="145" class="accent3 mono">ratatui</text>
+  <text x="355" y="168" class="dim">Frame layout, widgets,</text>
+  <text x="355" y="186" class="dim">help overlay, queue panel</text>
+
+  <!-- vt100 -->
+  <rect x="610" y="120" width="220" height="80" rx="6" class="box"/>
+  <text x="625" y="145" class="accent3 mono">vt100::Parser</text>
+  <text x="625" y="168" class="dim">parses shell bytes →</text>
+  <text x="625" y="186" class="dim">virtual screen cells</text>
+
+  <!-- AppState -->
+  <rect x="90" y="225" width="370" height="80" rx="6" class="box"/>
+  <text x="105" y="250" class="accent2 mono">AppState</text>
+  <text x="105" y="273" class="dim">queue · editor · shell_state · passthrough</text>
+  <text x="105" y="291" class="dim">force_queue · last_sigint_at · status · dirty</text>
+
+  <!-- OSC 133 -->
+  <rect x="490" y="225" width="340" height="80" rx="6" class="box"/>
+  <text x="505" y="250" class="accent2 mono">osc133::Detector</text>
+  <text x="505" y="273" class="dim">streaming state machine for</text>
+  <text x="505" y="291" class="dim">\e]133;A/B/C/D markers</text>
+
+  <!-- portable-pty -->
+  <rect x="90" y="330" width="740" height="70" rx="6" class="box"/>
+  <text x="105" y="355" class="accent mono">portable-pty</text>
+  <text x="105" y="378" class="dim">spawns $SHELL inside a PTY · master fd ←→ slave fd · resize, kill, BASH_ENV/ZDOTDIR</text>
+
+  <!-- Outer shell box -->
+  <rect x="490" y="395" width="340" height="35" rx="6" fill="#0c1a12" stroke="#2d4d36"/>
+  <text x="505" y="418" class="accent2 mono">your shell (zsh / bash / fish)</text>
+
+  <!-- Arrows -->
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa3b2"/>
+    </marker>
+  </defs>
+  <path class="stroke" d="M 660 305 V 330" marker-end="url(#arr)"/>
+  <path class="stroke" d="M 460 200 V 225" marker-end="url(#arr)"/>
+  <path class="stroke" d="M 720 200 V 225" marker-end="url(#arr)"/>
+  <path class="stroke" d="M 200 305 V 330" marker-end="url(#arr)"/>
+  <text x="475" y="220" class="dim mono" style="font-size:11px">parses</text>
+  <text x="735" y="220" class="dim mono" style="font-size:11px">stream</text>
+</svg>
+<figcaption>cmdq is a thin host: a PTY, a parser, a parser-of-the-parser (OSC 133), a UI library, and a state struct.</figcaption>
+</figure>
+
+<p>Every layer has one job and a clean seam to the next:</p>
+
+<ul>
+  <li><code>portable-pty</code> spawns the user's shell and gives back a master file descriptor — bytes the shell writes, bytes you write to the shell.</li>
+  <li><code>vt100::Parser</code> consumes those bytes and maintains a virtual screen (rows × cols of styled cells) — exactly what a real terminal would do, but as data.</li>
+  <li><code>osc133::Detector</code> watches the same byte stream for prompt-marker escape sequences and emits <code>PromptStart</code> / <code>CommandStart</code> / <code>CommandEnd</code> events.</li>
+  <li><code>ratatui</code> + <code>crossterm</code> own the real terminal: read keys, paint frames.</li>
+  <li><code>AppState</code> is the single source of truth that ties them.</li>
+</ul>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="pty">
+<h2><span class="num">04</span>Hosting the shell in a PTY</h2>
+
+<p>A pseudo-terminal is a kernel-provided pair of file descriptors that look like a terminal to the process on one end, and look like a pipe to the process on the other end.</p>
+
+<figure>
+<svg viewBox="0 0 880 220" role="img">
+  <rect x="40" y="60" width="200" height="100" rx="8" class="box-hi"/>
+  <text x="60" y="90" class="accent mono">cmdq process</text>
+  <text x="60" y="115" class="dim">owns master fd</text>
+  <text x="60" y="135" class="dim">reads shell bytes,</text>
+  <text x="60" y="153" class="dim">writes keystrokes</text>
+
+  <rect x="640" y="60" width="200" height="100" rx="8" class="box"/>
+  <text x="660" y="90" class="accent2 mono">your shell</text>
+  <text x="660" y="115" class="dim">slave fd is its</text>
+  <text x="660" y="135" class="dim">stdin/stdout/stderr —</text>
+  <text x="660" y="153" class="dim">it thinks it's a TTY</text>
+
+  <!-- PTY pair in middle -->
+  <rect x="290" y="80" width="300" height="60" rx="6" fill="#0a0d12" stroke="var(--accent)" stroke-dasharray="4 3"/>
+  <text x="320" y="105" class="accent mono">/dev/ptmx ←→ /dev/pts/N</text>
+  <text x="320" y="128" class="dim mono" style="font-size:11px">kernel-mediated bidirectional pipe</text>
+
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa3b2"/>
+    </marker>
+  </defs>
+  <path class="stroke" d="M 240 100 H 290" marker-end="url(#arr2)"/>
+  <path class="stroke" d="M 290 130 H 240" marker-end="url(#arr2)"/>
+  <path class="stroke" d="M 590 100 H 640" marker-end="url(#arr2)"/>
+  <path class="stroke" d="M 640 130 H 590" marker-end="url(#arr2)"/>
+</svg>
+</figure>
+
+<p>The crate <code>portable-pty</code> abstracts macOS, Linux, and Windows. The spawn looks like this:</p>
+
+<pre><code><span class="k">let</span> pty = native_pty_system();
+<span class="k">let</span> pair = pty.openpty(PtySize { rows, cols, .. })?;
+
+<span class="k">let</span> <span class="k">mut</span> cmd = CommandBuilder::new(<span class="s">"/bin/zsh"</span>);
+cmd.env(<span class="s">"CMDQ_ACTIVE"</span>, <span class="s">"1"</span>);                    <span class="c">// integration knows it's inside cmdq</span>
+cmd.env(<span class="s">"ZDOTDIR"</span>, &amp;injected_zdotdir);            <span class="c">// see "Shell integration" below</span>
+
+<span class="k">let</span> child  = pair.slave.spawn_command(cmd)?;
+<span class="k">let</span> reader = pair.master.try_clone_reader()?;       <span class="c">// shell bytes ←</span>
+<span class="k">let</span> writer = pair.master.take_writer()?;            <span class="c">// → shell stdin</span>
+</code></pre>
+
+<p>From here on, "writing a queued command" means: write its bytes into the master, exactly as if the user had typed them.</p>
+
+<div class="callout">
+  <strong>The PTY is the interface.</strong> Once you wrap something in a PTY, you don't care which shell it is. zsh, bash, fish, sh — they all just read keystrokes and write bytes. cmdq's queue, dispatch, and rendering are 100% shell-agnostic.
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="osc133">
+<h2><span class="num">05</span>OSC 133: knowing what the shell is doing</h2>
+
+<p>cmdq needs to answer a simple question on every keystroke: <em>is the shell at a prompt, or is it running a command?</em>
+That decides whether your keystroke goes through to the shell ("type ls and hit enter") or into the queue panel ("queue this for after the current job finishes").</p>
+
+<h3>Things that don't work</h3>
+<table>
+  <thead><tr><th>Idea</th><th>Why not</th></tr></thead>
+  <tbody>
+    <tr><td>Parse the prompt regex (<code>PS1</code>)</td><td>Users have arbitrary prompts. Powerlevel10k, starship, custom — there's no universal pattern. False positives everywhere.</td></tr>
+    <tr><td>Watch the cursor position</td><td>Heuristic; breaks on every full-screen TUI, on multi-line prompts, on transient progress bars.</td></tr>
+    <tr><td>Poll <code>ps</code> for child processes of the shell</td><td>Race-prone; expensive; misses shell builtins (the running "thing" isn't a separate process).</td></tr>
+    <tr><td>Trust a timeout</td><td>"If no output for 200ms, assume prompt." Wrong on slow commands, wrong on tail-style watchers.</td></tr>
+  </tbody>
+</table>
+
+<h3>The right answer: the shell tells you</h3>
+
+<p>OSC 133 is a small de-facto-standard set of escape sequences that modern terminals (iTerm2, WezTerm, Kitty, Ghostty, VS Code) ask shells to emit, marking exactly the events we need. cmdq just listens for them.</p>
+
+<figure>
+<svg viewBox="0 0 920 220" role="img">
+  <!-- timeline -->
+  <line x1="40" y1="120" x2="880" y2="120" class="stroke-fg"/>
+  <text x="40" y="200" class="dim mono">time →</text>
+
+  <!-- markers as ticks -->
+  <g>
+    <line x1="120" y1="100" x2="120" y2="140" class="stroke-accent"/>
+    <text x="100" y="92" class="accent mono">133;A</text>
+    <text x="80" y="170" class="dim" style="font-size:12px">prompt start</text>
+  </g>
+  <g>
+    <line x1="280" y1="100" x2="280" y2="140" class="stroke-accent"/>
+    <text x="260" y="92" class="accent mono">133;B</text>
+    <text x="252" y="170" class="dim" style="font-size:12px">prompt end</text>
+  </g>
+  <g>
+    <line x1="440" y1="100" x2="440" y2="140" class="stroke-accent2"/>
+    <text x="418" y="92" class="accent2 mono">133;C</text>
+    <text x="408" y="170" class="dim" style="font-size:12px">command start</text>
+  </g>
+  <g>
+    <line x1="780" y1="100" x2="780" y2="140" class="stroke-accent2"/>
+    <text x="758" y="92" class="accent2 mono">133;D;0</text>
+    <text x="754" y="170" class="dim" style="font-size:12px">command end + exit</text>
+  </g>
+
+  <!-- text shown -->
+  <text x="138" y="118" class="mono dim">$&nbsp;</text>
+  <text x="295" y="118" class="mono dim">echo hi</text>
+  <text x="455" y="118" class="mono dim">hi&nbsp;…&nbsp;output&nbsp;…</text>
+</svg>
+<figcaption>Four markers around every prompt + command lifecycle. <code>D</code> carries the exit code, which is gold.</figcaption>
+</figure>
+
+<p>The raw bytes look like this:</p>
+<pre><code><span class="c">// printed by the shell, never displayed (terminals strip OSC sequences)</span>
+\x1b]133;A\x07          <span class="c">// before prompt</span>
+$ echo hi
+\x1b]133;B\x07          <span class="c">// after prompt, before user types</span>
+\x1b]133;C\x07          <span class="c">// command starts running</span>
+hi
+\x1b]133;D;0\x07        <span class="c">// command ended, exit 0</span>
+</code></pre>
+
+<h3>Streaming detector</h3>
+
+<p>The PTY hands cmdq bytes in arbitrary chunks — a marker can split across two reads. So the detector is a small state machine, not a regex:</p>
+
+<pre><code><span class="k">enum</span> <span class="t">State</span> { Normal, AfterEsc, InOsc, InOscAfterEsc }
+
+<span class="k">pub fn</span> <span class="f">feed</span>(&amp;<span class="k">mut</span> <span class="k">self</span>, bytes: &amp;[<span class="t">u8</span>]) -&gt; <span class="t">Vec</span>&lt;Event&gt; {
+    <span class="k">for</span> &amp;b <span class="k">in</span> bytes {
+        <span class="k">match</span> <span class="k">self</span>.state {
+            State::Normal <span class="k">if</span> b == <span class="n">0x1b</span> =&gt; <span class="k">self</span>.state = State::AfterEsc,
+            State::AfterEsc <span class="k">if</span> b == <span class="n">b']'</span> =&gt; { <span class="k">self</span>.body.clear(); <span class="k">self</span>.state = State::InOsc; }
+            State::InOsc <span class="k">if</span> b == <span class="n">0x07</span> =&gt; { <span class="k">self</span>.<span class="f">emit</span>(out); <span class="k">self</span>.state = State::Normal; }
+            State::InOsc <span class="k">if</span> b == <span class="n">0x1b</span> =&gt; <span class="k">self</span>.state = State::InOscAfterEsc,
+            State::InOscAfterEsc <span class="k">if</span> b == <span class="n">b'\\'</span> =&gt; { <span class="k">self</span>.<span class="f">emit</span>(out); <span class="k">self</span>.state = State::Normal; }
+            State::InOsc <span class="k">if</span> <span class="k">self</span>.body.len() &lt; <span class="n">256</span> =&gt; <span class="k">self</span>.body.push(b),
+            <span class="c">// ... reset on overflow / unrelated bytes</span>
+        }
+    }
+}
+</code></pre>
+
+<p>Two terminators are accepted: <code>BEL</code> (<code>0x07</code>) and <code>ESC \</code> (the proper "string terminator"). The 256-byte body cap keeps a runaway emitter from growing the buffer unbounded. Twelve unit tests pin all the edge cases (split bytes, malformed bodies, mixed terminators, nested-looking sequences).</p>
+
+<div class="callout insight">
+  <strong>Lesson.</strong> When you need a fact that the controlled side already knows (here: "I'm at a prompt now"), don't infer it — get the controlled side to <em>tell</em> you. Inference is heuristics, telling is correctness.
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="render">
+<h2><span class="num">06</span>Rendering: vt100 inside ratatui</h2>
+
+<p>cmdq has to draw <em>two</em> things in one screen:</p>
+<ol>
+  <li>The inner shell — colors, cursor, alt-screen TUIs, the works. This must look exactly like a real terminal.</li>
+  <li>The queue panel below it — its own UI, with input line, queue list, hint line.</li>
+</ol>
+
+<p>Doing the first one from scratch is a multi-year project (terminal compatibility is a swamp). Instead: <strong>let a terminal emulator crate keep an in-memory screen</strong>, then paint that screen into ratatui's frame.</p>
+
+<figure>
+<svg viewBox="0 0 920 280" role="img">
+  <!-- pty -->
+  <rect x="40" y="120" width="160" height="60" rx="6" class="box"/>
+  <text x="60" y="148" class="accent mono">PTY bytes</text>
+  <text x="60" y="168" class="dim mono" style="font-size:11px">\x1b[31mfoo\x1b[0m</text>
+
+  <!-- vt100 -->
+  <rect x="240" y="100" width="200" height="100" rx="6" class="box"/>
+  <text x="260" y="128" class="accent3 mono">vt100::Parser</text>
+  <text x="260" y="151" class="dim">virtual screen:</text>
+  <text x="260" y="170" class="dim">rows × cols of cells,</text>
+  <text x="260" y="188" class="dim">styled (fg/bg/bold)</text>
+
+  <!-- VtScreen widget -->
+  <rect x="480" y="100" width="220" height="100" rx="6" class="box"/>
+  <text x="500" y="128" class="accent2 mono">VtScreen widget</text>
+  <text x="500" y="151" class="dim">walks each cell,</text>
+  <text x="500" y="170" class="dim">writes symbol + style into</text>
+  <text x="500" y="188" class="dim">ratatui's Buffer</text>
+
+  <!-- ratatui frame -->
+  <rect x="740" y="60" width="140" height="180" rx="6" class="box-hi"/>
+  <text x="760" y="88" class="accent mono">Frame</text>
+  <text x="760" y="115" class="dim">top: shell</text>
+  <text x="760" y="170" class="dim">bottom: queue</text>
+  <line x1="750" y1="135" x2="870" y2="135" class="stroke-accent" stroke-dasharray="3 2"/>
+
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa3b2"/>
+    </marker>
+  </defs>
+  <path class="stroke" d="M 200 150 H 240" marker-end="url(#arr3)"/>
+  <path class="stroke" d="M 440 150 H 480" marker-end="url(#arr3)"/>
+  <path class="stroke" d="M 700 150 H 740" marker-end="url(#arr3)"/>
+</svg>
+<figcaption>vt100 turns bytes into a 2D grid; cmdq turns that grid into ratatui cells. ratatui handles the actual on-screen diff.</figcaption>
+</figure>
+
+<p>The widget is short:</p>
+
+<pre><code><span class="k">impl</span> Widget <span class="k">for</span> VtScreen&lt;<span class="k">'_</span>&gt; {
+    <span class="k">fn</span> <span class="f">render</span>(<span class="k">self</span>, area: Rect, buf: &amp;<span class="k">mut</span> Buffer) {
+        <span class="k">let</span> screen = <span class="k">self</span>.parser.<span class="f">screen</span>();
+        <span class="k">for</span> row <span class="k">in</span> <span class="n">0</span>..screen.size().<span class="n">0</span>.<span class="f">min</span>(area.height) {
+            <span class="k">for</span> col <span class="k">in</span> <span class="n">0</span>..screen.size().<span class="n">1</span>.<span class="f">min</span>(area.width) {
+                <span class="k">let</span> cell = screen.<span class="f">cell</span>(row, col).<span class="f">unwrap</span>();
+                <span class="k">let</span> <span class="k">mut</span> style = Style::<span class="f">default</span>();
+                <span class="k">if</span> <span class="k">let</span> Some(c) = <span class="f">vt_color_to_ratatui</span>(cell.<span class="f">fgcolor</span>()) { style = style.<span class="f">fg</span>(c); }
+                <span class="k">if</span> cell.<span class="f">bold</span>()      { style = style.<span class="f">add_modifier</span>(Modifier::BOLD); }
+                <span class="k">if</span> cell.<span class="f">underline</span>() { style = style.<span class="f">add_modifier</span>(Modifier::UNDERLINED); }
+                <span class="c">// ... italic, inverse, bg ...</span>
+                <span class="k">if</span> <span class="k">let</span> Some(c) = buf.<span class="f">cell_mut</span>((area.x + col, area.y + row)) {
+                    c.<span class="f">set_symbol</span>(<span class="k">if</span> cell.<span class="f">contents</span>().<span class="f">is_empty</span>() { <span class="s">" "</span> } <span class="k">else</span> { cell.<span class="f">contents</span>() });
+                    c.<span class="f">set_style</span>(style);
+                }
+            }
+        }
+    }
+}
+</code></pre>
+
+<h3>The queue panel layout</h3>
+
+<figure>
+<svg viewBox="0 0 880 320" role="img">
+  <rect x="40" y="20" width="800" height="280" rx="8" class="box"/>
+  <text x="60" y="50" class="dim mono">cmdq's frame, vertically split</text>
+
+  <!-- shell area -->
+  <rect x="60" y="70" width="760" height="120" fill="#0a0d12" stroke="var(--line)"/>
+  <text x="80" y="100" class="dim mono">$ sleep 30</text>
+  <text x="80" y="120" class="dim mono">…running…</text>
+  <text x="730" y="180" class="dim" style="font-size:11px">vt100 area</text>
+
+  <!-- header line -->
+  <rect x="60" y="195" width="760" height="18" fill="#161b22" stroke="var(--line)"/>
+  <text x="72" y="208" class="dim mono" style="font-size:11px">─ cmdq │ queue: 2 │ dispatched #4 ──────────────────────</text>
+
+  <!-- queue rows -->
+  <text x="72" y="232" class="accent mono" style="font-size:12px">&gt;   5  git status</text>
+  <text x="72" y="250" class="accent3 mono" style="font-size:12px">    ?6  cargo test     <tspan class="dim">(conditional)</tspan></text>
+
+  <!-- input line -->
+  <rect x="60" y="258" width="760" height="20" fill="#0a0d12"/>
+  <text x="72" y="272" class="accent2 mono" style="font-size:12px">queue&gt; <tspan fill="#fff">npm run lint</tspan>▎</text>
+
+  <!-- hint -->
+  <text x="72" y="294" class="dim mono" style="font-size:11px">? help · Enter queue · ↑ edit · Tab cond · ⌃X pause · ⌃K clear · ⌃\ passthrough</text>
+</svg>
+<figcaption>From top to bottom: vt100 shell, header, queue list, input line, hint line.</figcaption>
+</figure>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="queue">
+<h2><span class="num">07</span>Queue model & dispatch</h2>
+
+<h3>Just a Vec</h3>
+<pre><code><span class="k">pub struct</span> <span class="t">QueueItem</span> { <span class="k">pub</span> id: <span class="t">u64</span>, <span class="k">pub</span> command: <span class="t">String</span>, <span class="k">pub</span> conditional: <span class="t">bool</span> }
+<span class="k">pub struct</span> <span class="t">Queue</span>     { items: <span class="t">Vec</span>&lt;QueueItem&gt;, next_id: <span class="t">u64</span>, <span class="k">pub</span> paused: <span class="t">bool</span> }
+</code></pre>
+
+<p>No fancy data structure — the queue is short by definition (it's a UI affordance, not a job system). Stable monotonic IDs make logging readable and editing safe across reorders.</p>
+
+<h3>Dispatch is "type the bytes for the user"</h3>
+
+<p>When a <code>CommandEnd</code> marker arrives, cmdq writes the next eligible item's bytes back into the PTY master:</p>
+
+<pre><code><span class="k">if let</span> Some(item) = state.queue.<span class="f">pop_next_eligible</span>(exit_code) {
+    writer.<span class="f">write_all</span>(item.command.<span class="f">as_bytes</span>())?;
+    writer.<span class="f">write_all</span>(<span class="s">b"\n"</span>)?;        <span class="c">// trigger the Enter</span>
+}
+</code></pre>
+
+<p>The shell can't tell the difference between "user typed it" and "cmdq wrote it" — that's the whole point of the PTY abstraction.</p>
+
+<h3>Conditional chaining</h3>
+
+<p>An item flagged <code>conditional</code> only runs if the previous command's exit code was 0. The exit code arrives <em>inside</em> the OSC 133 D marker (<code>\x1b]133;D;1\x07</code>). So conditional skipping isn't a separate machine — it's one filter on dispatch:</p>
+
+<pre><code><span class="k">pub fn</span> <span class="f">pop_next_eligible</span>(&amp;<span class="k">mut</span> <span class="k">self</span>, prev_exit: Option&lt;<span class="t">i32</span>&gt;) -&gt; Option&lt;QueueItem&gt; {
+    <span class="k">while let</span> Some(front) = <span class="k">self</span>.items.<span class="f">first</span>() {
+        <span class="k">if</span> front.conditional &amp;&amp; prev_exit != Some(<span class="n">0</span>) {
+            <span class="k">self</span>.items.<span class="f">remove</span>(<span class="n">0</span>);  <span class="c">// drop the skipped item, try the next</span>
+            <span class="k">continue</span>;
+        }
+        <span class="k">return</span> Some(<span class="k">self</span>.items.<span class="f">remove</span>(<span class="n">0</span>));
+    }
+    None
+}
+</code></pre>
+
+<h3>Persistence</h3>
+
+<p>The queue is JSON-serialized to <code>~/.local/share/cmdq/queue.json</code> so a crash mid-session doesn't lose pending work. Originally this saved on every event-loop tick (~60 Hz). After a code review pass it got a <code>queue_dirty</code> flag and now saves only on real mutation.</p>
+
+<div class="callout warn">
+  <strong>The bug that almost shipped.</strong> "Save the queue every iteration" feels safe — until you realize the loop runs at 60 Hz and you're rewriting the same JSON file 60 times per second of idle. The fix is a one-line dirty flag. The lesson: <em>any unconditional work inside an event loop is suspect.</em>
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="integration">
+<h2><span class="num">08</span>Shell integration without surgery</h2>
+
+<p>For OSC 133 markers to exist at all, the shell has to emit them — so cmdq ships three tiny snippets (one per supported shell) that hook the right precmd/preexec points.</p>
+
+<div class="grid3">
+  <div class="card"><h4>zsh</h4><pre style="margin:0;font-size:12px"><code><span class="f">_cmdq_precmd</span>()  { <span class="f">printf</span> <span class="s">'\e]133;A\a'</span>; }
+<span class="f">_cmdq_preexec</span>() { <span class="f">printf</span> <span class="s">'\e]133;C\a'</span>; }
+precmd_functions+=(_cmdq_precmd)
+preexec_functions+=(_cmdq_preexec)</code></pre></div>
+  <div class="card"><h4>bash</h4><p class="note"><code>PROMPT_COMMAND</code> for prompt, <code>DEBUG</code> trap for command-start, <code>trap … EXIT</code> for end. Bash makes you work for it.</p></div>
+  <div class="card"><h4>fish</h4><p class="note"><code>fish_preexec</code>, <code>fish_postexec</code>, <code>fish_prompt</code> events. Cleanest of the three.</p></div>
+</div>
+
+<p>Each snippet is gated by <code>$CMDQ_ACTIVE</code> so it only runs inside cmdq, never in normal shell sessions.</p>
+
+<h3>The ZDOTDIR shim — auto-integration without editing user files</h3>
+
+<p>The first time you run cmdq, you don't want to be told "now go edit your <code>.zshrc</code>". You also don't want to <em>silently</em> edit it. So for zsh, cmdq builds an ephemeral <code>ZDOTDIR</code>:</p>
+
+<figure>
+<svg viewBox="0 0 880 240" role="img">
+  <rect x="40" y="40" width="200" height="80" rx="6" class="box"/>
+  <text x="60" y="68" class="accent mono">~/.zshrc</text>
+  <text x="60" y="92" class="dim">user's real config</text>
+  <text x="60" y="108" class="dim">(untouched)</text>
+
+  <rect x="320" y="20" width="240" height="180" rx="6" class="box-hi"/>
+  <text x="340" y="48" class="accent mono">$XDG_RUNTIME_DIR/cmdq-zdotdir/</text>
+  <text x="340" y="78" class="dim mono" style="font-size:12px">.zshrc:</text>
+  <text x="340" y="100" class="dim mono" style="font-size:11px">source ~/.zshrc</text>
+  <text x="340" y="118" class="dim mono" style="font-size:11px">source &lt;cmdq integration&gt;</text>
+  <text x="340" y="160" class="dim">a tiny dir cmdq spawns</text>
+  <text x="340" y="178" class="dim">zsh from</text>
+
+  <rect x="640" y="40" width="200" height="80" rx="6" class="box"/>
+  <text x="660" y="68" class="accent2 mono">zsh inside cmdq</text>
+  <text x="660" y="92" class="dim">loads real rc, then</text>
+  <text x="660" y="108" class="dim">our snippet on top</text>
+
+  <defs>
+    <marker id="arr4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa3b2"/>
+    </marker>
+  </defs>
+  <path class="stroke" d="M 240 80 H 320" marker-end="url(#arr4)"/>
+  <path class="stroke" d="M 560 110 H 640" marker-end="url(#arr4)"/>
+</svg>
+<figcaption>cmdq spawns zsh with a synthetic ZDOTDIR pointing at a one-line rc that sources the user's real one — then layers integration on top. Zero edits to your dotfiles.</figcaption>
+</figure>
+
+<p>For users who want it permanent in normal shell sessions too, <code>cmdq --install-integration</code> writes a marked block into the right rc file (with idempotent <code># &gt;&gt;&gt; cmdq …</code> guards so it can be safely re-run or removed).</p>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="ux">
+<h2><span class="num">09</span>UX polish: alt-screen, SIGINT, discoverability</h2>
+
+<p>The basic mechanism (queue while running, dispatch on end) was working before any of this. These three problems only showed up in real use — and each one has a small, testable fix.</p>
+
+<h3>Problem 1: cmdq fights with TUI programs</h3>
+
+<p>You run <code>vim</code>. cmdq's queue panel is still showing at the bottom. Your arrow keys go into cmdq's editor instead of vim. Misery.</p>
+
+<p><strong>Solution: detect alt-screen.</strong> Full-screen TUIs (vim, htop, less, fzf, btop, nvim) all emit DECSET 1049 to switch into the alternate screen buffer. <code>vt100::Parser</code> exposes this as a single bool:</p>
+
+<pre><code><span class="k">let</span> on_alt = parser.<span class="f">screen</span>().<span class="f">alternate_screen</span>();
+<span class="k">if</span> on_alt &amp;&amp; !state.auto_passthrough {
+    state.auto_passthrough = <span class="k">true</span>;       <span class="c">// hide panel, forward keys verbatim</span>
+} <span class="k">else if</span> !on_alt &amp;&amp; state.auto_passthrough {
+    state.auto_passthrough = <span class="k">false</span>;      <span class="c">// vim quit; back to queue mode</span>
+}
+</code></pre>
+
+<p>No user toggle. No config. No special list of programs. The signal is already in the byte stream — cmdq just listens.</p>
+
+<h3>Problem 2: Ctrl-C auto-fires the next command</h3>
+
+<p>You queue three things, change your mind on the running command, hit Ctrl-C — and cmdq dutifully fires the first queued command at you. That's <em>exactly</em> the wrong inference.</p>
+
+<p><strong>Solution: SIGINT auto-pause.</strong></p>
+
+<figure>
+<svg viewBox="0 0 880 240" role="img">
+  <line x1="40" y1="120" x2="840" y2="120" class="stroke-fg"/>
+  <g>
+    <line x1="120" y1="100" x2="120" y2="140" class="stroke-accent2"/>
+    <text x="80" y="92" class="accent2 mono">CommandStart</text>
+  </g>
+  <g>
+    <line x1="380" y1="100" x2="380" y2="140" class="stroke-accent"/>
+    <text x="340" y="92" class="accent mono">user ⌃C</text>
+    <text x="340" y="170" class="dim" style="font-size:12px">last_sigint_at = now</text>
+  </g>
+  <g>
+    <line x1="620" y1="100" x2="620" y2="140" class="stroke-accent2"/>
+    <text x="570" y="92" class="accent2 mono">CommandEnd; D;130</text>
+    <text x="570" y="170" class="dim" style="font-size:12px">→ pause queue, don't dispatch</text>
+  </g>
+  <text x="40" y="200" class="dim mono">3-second window decides "did the user just abort?"</text>
+</svg>
+</figure>
+
+<pre><code><span class="k">const</span> SIGINT_AUTO_PAUSE_WINDOW: Duration = Duration::<span class="f">from_secs</span>(<span class="n">3</span>);
+
+<span class="k">fn</span> <span class="f">handle_command_end</span>(state: &amp;<span class="k">mut</span> AppState, exit_code: Option&lt;<span class="t">i32</span>&gt;, ..) {
+    <span class="k">let</span> recent_sigint = state.last_sigint_at
+        .<span class="f">map</span>(|t| t.<span class="f">elapsed</span>() &lt;= SIGINT_AUTO_PAUSE_WINDOW).<span class="f">unwrap_or</span>(<span class="k">false</span>);
+    <span class="k">let</span> exit_was_sigint = exit_code == Some(<span class="n">130</span>);   <span class="c">// 128 + SIGINT</span>
+
+    <span class="k">if</span> (recent_sigint || exit_was_sigint) &amp;&amp; !state.queue.<span class="f">is_empty</span>() {
+        state.queue.paused = <span class="k">true</span>;
+        state.status = <span class="s">"Ctrl-C — queue paused. Ctrl-X to resume, Ctrl-K to clear."</span>.<span class="f">into</span>();
+        <span class="k">return</span>;
+    }
+    <span class="c">// ... else dispatch next eligible</span>
+}
+</code></pre>
+
+<p>Two signals are checked together: did we forward <code>0x03</code> to the PTY in the last 3 seconds, <em>or</em> did the marker report exit 130. Either is enough. Both are required because a misbehaved program might trap SIGINT and exit normally, or exit 130 from internal error.</p>
+
+<h3>Problem 3: the panel flashes for fast commands</h3>
+
+<p>Short commands like <code>ls</code> or <code>cd</code> finish in milliseconds. Surfacing the queue panel for them just makes the screen flicker every time you hit Enter at a prompt.</p>
+
+<p><strong>Solution: a 1.5-second grace period.</strong> The panel only appears once the current command has actually been running long enough to be worth queueing against. <code>command_started_at</code> is set on <code>CommandStart</code>, cleared on <code>CommandEnd</code>; <code>in_queue_mode()</code> only returns true once <code>elapsed() &gt;= QUEUE_PANEL_DELAY</code>.</p>
+
+<pre><code><span class="k">const</span> QUEUE_PANEL_DELAY: Duration = Duration::<span class="f">from_millis</span>(<span class="n">1500</span>);
+
+<span class="k">fn</span> <span class="f">command_long_running</span>(&amp;<span class="k">self</span>) -&gt; <span class="t">bool</span> {
+    <span class="k">self</span>.command_started_at
+        .<span class="f">map</span>(|t| t.<span class="f">elapsed</span>() &gt;= QUEUE_PANEL_DELAY)
+        .<span class="f">unwrap_or</span>(<span class="k">false</span>)
+}
+
+<span class="k">fn</span> <span class="f">in_queue_mode</span>(&amp;<span class="k">self</span>) -&gt; <span class="t">bool</span> {
+    !<span class="k">self</span>.<span class="f">effective_passthrough</span>() &amp;&amp; (<span class="k">self</span>.<span class="f">command_long_running</span>() || <span class="k">self</span>.force_queue)
+}
+</code></pre>
+
+<p>Force-queue (<code>Ctrl-Q</code>) bypasses the delay: if you know you're about to need it, you can summon the panel immediately.</p>
+
+<h3>Problem 4: nobody knows the keybindings</h3>
+
+<p>A flashy TUI with twelve hidden shortcuts is hostile. Three-tier disclosure:</p>
+
+<div class="grid3">
+  <div class="card"><h4>Tier 1 — always visible</h4><p>A dim hint line at the bottom of the queue panel: <code>? help · Enter queue · ↑ edit · Tab cond · ⌃X pause · ⌃K clear · ⌃\ passthrough</code></p></div>
+  <div class="card"><h4>Tier 2 — one keystroke</h4><p>Press <code>?</code> on an empty buffer or <code>F1</code> anywhere — full overlay opens. Sections: queueing, queue control, modes, misc.</p></div>
+  <div class="card"><h4>Tier 3 — README</h4><p>Full table on disk for users skimming the project before they install.</p></div>
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="eventloop">
+<h2><span class="num">10</span>The event loop, end to end</h2>
+
+<figure>
+<svg viewBox="0 0 920 580" role="img">
+  <rect x="380" y="20"  width="180" height="40" rx="6" class="box-hi"/>
+  <text x="420" y="46" class="accent mono">main loop</text>
+
+  <rect x="60"  y="100" width="240" height="60" rx="6" class="box"/>
+  <text x="80"  y="125" class="accent3 mono">drain PTY bytes</text>
+  <text x="80"  y="146" class="dim" style="font-size:12px">parser.process(..)</text>
+
+  <rect x="340" y="100" width="240" height="60" rx="6" class="box"/>
+  <text x="360" y="125" class="accent3 mono">feed osc133::Detector</text>
+  <text x="360" y="146" class="dim" style="font-size:12px">emit Prompt/Cmd events</text>
+
+  <rect x="620" y="100" width="240" height="60" rx="6" class="box"/>
+  <text x="640" y="125" class="accent3 mono">handle CommandEnd</text>
+  <text x="640" y="146" class="dim" style="font-size:12px">dispatch | auto-pause</text>
+
+  <rect x="60"  y="210" width="240" height="60" rx="6" class="box"/>
+  <text x="80"  y="235" class="accent2 mono">check alt-screen</text>
+  <text x="80"  y="256" class="dim" style="font-size:12px">toggle auto_passthrough</text>
+
+  <rect x="340" y="210" width="240" height="60" rx="6" class="box"/>
+  <text x="360" y="235" class="accent2 mono">poll keyboard 16ms</text>
+  <text x="360" y="256" class="dim" style="font-size:12px">crossterm::event::poll</text>
+
+  <rect x="620" y="210" width="240" height="60" rx="6" class="box"/>
+  <text x="640" y="235" class="accent2 mono">handle_key()</text>
+  <text x="640" y="256" class="dim" style="font-size:12px">in_queue? → editor : forward</text>
+
+  <rect x="60"  y="320" width="240" height="60" rx="6" class="box"/>
+  <text x="80"  y="345" class="accent mono">if queue_dirty:</text>
+  <text x="80"  y="366" class="dim" style="font-size:12px">save JSON, clear flag</text>
+
+  <rect x="340" y="320" width="240" height="60" rx="6" class="box"/>
+  <text x="360" y="345" class="accent mono">if 16ms elapsed:</text>
+  <text x="360" y="366" class="dim" style="font-size:12px">term.draw(..)</text>
+
+  <rect x="620" y="320" width="240" height="60" rx="6" class="box"/>
+  <text x="640" y="345" class="accent mono">pty.try_wait()</text>
+  <text x="640" y="366" class="dim" style="font-size:12px">shell exited? exit cmdq</text>
+
+  <!-- loop arrow -->
+  <path d="M 470 380 V 420 H 470" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+  <path d="M 470 420 H 880 V 40 H 560" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arr3)"/>
+
+  <!-- annotations -->
+  <text x="60" y="490" class="dim" style="font-size:13px">Two cadences live in this loop:</text>
+  <text x="60" y="512" class="dim" style="font-size:13px">• Input poll: up to 16 ms — keeps key-press latency low.</text>
+  <text x="60" y="532" class="dim" style="font-size:13px">• Render gate: at most every 16 ms — caps redraws at ~62 Hz even under chatty shells.</text>
+  <text x="60" y="552" class="dim" style="font-size:13px">• PTY drain: as fast as bytes arrive — never throttled, so output is never starved.</text>
+</svg>
+</figure>
+
+<p>One thread reads the PTY into an <code>mpsc::channel</code>; the main thread does everything else. No async runtime, no executor — the loop is short enough that cooperative polling is simpler than futures.</p>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="testing">
+<h2><span class="num">11</span>Test strategy</h2>
+
+<p>51 tests across three layers. The point isn't the count — it's that each layer has tests written in its own vocabulary.</p>
+
+<table>
+  <thead><tr><th>Layer</th><th>What's tested</th><th>How</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Unit (45)<br><span class="pill">fast</span></td>
+      <td>OSC 133 detector edge cases · queue ops · line-editor key handling · conditional skipping · AppState toggles · SIGINT auto-pause logic</td>
+      <td>Pure Rust, no I/O. <code>cargo test --lib</code> is &lt; 50 ms.</td>
+    </tr>
+    <tr>
+      <td>Integration (4)<br><span class="pill">real shell</span></td>
+      <td>Real bash spawned in a real PTY emits real OSC 133. cmdq's detector picks them up. Conditional-skip works end-to-end.</td>
+      <td><code>portable-pty</code> spawns <code>/bin/bash --norc --rcfile &lt;our integration&gt; -i</code>; reads bytes; matches against <code>\x1b]133;D</code> markers.</td>
+    </tr>
+    <tr>
+      <td>Binary smoke (2)<br><span class="pill">end-to-end</span></td>
+      <td>The actual <code>cmdq</code> binary runs inside a PTY, force-queues a command, types a trigger command, observes both run.</td>
+      <td>The crate exposes both a lib and a bin target so tests can drive the same binary users get.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout insight">
+  <strong>Why bother with the binary smoke test?</strong> Because unit tests can't catch "I forgot to wire the OSC detector into the loop" or "ratatui crashes when alt-screen toggles too fast". The smoke test reproduces the whole runtime — terminal modes, signal handlers, panic hooks — and fails loudly if any of them are misconfigured.
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="rust">
+<h2><span class="num">12</span>Rust-specific lessons</h2>
+
+<h3>Crate choices that mattered</h3>
+<table>
+  <thead><tr><th>Concern</th><th>Crate</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Cross-platform PTY</td><td><code>portable-pty</code></td><td>WezTerm's PTY layer; macOS/Linux/Windows in one API. The alternative (<code>nix::pty</code> + Windows ConPTY directly) is two implementations of the same thing.</td></tr>
+    <tr><td>Terminal raw mode + key parsing</td><td><code>crossterm</code></td><td>Stable, ergonomic, works on all three OSes. <code>termion</code> is Linux-only.</td></tr>
+    <tr><td>TUI rendering</td><td><code>ratatui</code></td><td>Diffing buffer-based renderer means you describe what to draw, it computes the minimal byte sequence to update the screen.</td></tr>
+    <tr><td>Terminal emulation</td><td><code>vt100</code></td><td>Maintains a virtual screen given byte input. Saves ~years of CSI/SGR/DECSET implementation work. Exposes <code>alternate_screen()</code>, which is how auto-passthrough is free.</td></tr>
+    <tr><td>Serialization</td><td><code>serde</code> + <code>serde_json</code></td><td>Boring on purpose. Queue persistence is a few hundred bytes.</td></tr>
+    <tr><td>CLI parsing</td><td><code>clap</code></td><td>Derive macros; three flags total.</td></tr>
+  </tbody>
+</table>
+
+<h3>Patterns worth keeping</h3>
+
+<div class="lessons">
+  <div class="lesson">
+    <h5>AppState over function-arg sprawl</h5>
+    <p>Original <code>handle_key</code> took 10 separate <code>&amp;mut</code> parameters. After consolidation it takes <code>&amp;mut AppState</code>. Adding a new piece of state is now a one-line struct field, not a refactor of every call site.</p>
+  </div>
+  <div class="lesson">
+    <h5>&'static str over String for static literals</h5>
+    <p><code>input_prompt_prefix</code> originally returned <code>String</code> with <code>.to_string()</code> in every match arm. Switching to <code>&amp;'static str</code> dropped five allocations per render frame. Free.</p>
+  </div>
+  <div class="lesson">
+    <h5>Borrow in render hot paths</h5>
+    <p><code>Span::raw(input_buffer)</code> instead of <code>Span::raw(input_buffer.to_string())</code>. ratatui's <code>Span&lt;'a&gt;</code> is built for borrows; cloning was muscle-memory, not necessity.</p>
+  </div>
+  <div class="lesson">
+    <h5>mpsc::channel for the reader thread</h5>
+    <p>One thread does <code>read()</code> on the PTY (a blocking call); it sends <code>Vec&lt;u8&gt;</code> chunks to the main thread via channel. Main thread <code>try_recv</code>s in a non-blocking loop. No async runtime needed for one producer + one consumer.</p>
+  </div>
+  <div class="lesson">
+    <h5>Streaming state machines beat regex</h5>
+    <p>OSC 133 detection is a 4-state machine that handles arbitrary byte splits. A regex would buffer everything; the machine consumes one byte at a time and emits events as they complete.</p>
+  </div>
+  <div class="lesson">
+    <h5>Test the binary you ship</h5>
+    <p><code>option_env!("CARGO_BIN_EXE_cmdq")</code> gives integration tests the path to the real built binary. Running it inside <code>portable-pty</code> from a test catches startup/shutdown bugs that no unit test can.</p>
+  </div>
+  <div class="lesson">
+    <h5>Lib + bin in one crate</h5>
+    <p>Adding <code>[lib]</code> alongside <code>[[bin]]</code> in <code>Cargo.toml</code> lets integration tests import internal modules <em>and</em> drive the compiled binary, with one toolchain run.</p>
+  </div>
+  <div class="lesson">
+    <h5>Dirty flags for persistence</h5>
+    <p>"Save every loop iteration" → 60 disk writes per idle second. <code>queue_dirty: bool</code>, set on every mutation, cleared after save. Same correctness, ~zero idle I/O.</p>
+  </div>
+  <div class="lesson">
+    <h5>Panic hooks restore the terminal</h5>
+    <p>If anything panics while raw mode is on, the user's terminal is wedged. <code>std::panic::set_hook</code> wrapping the original ensures alt-screen and raw mode are dropped before the panic surfaces.</p>
+  </div>
+  <div class="lesson">
+    <h5>Clippy as a forcing function</h5>
+    <p><code>cargo clippy --all-targets -- -D warnings</code> in CI catches <code>collapsible_if</code>, <code>manual_repeat_n</code>, <code>needless_borrow</code>, <code>too_many_arguments</code> — design smells masquerading as lints.</p>
+  </div>
+</div>
+
+<h3>Things that surprised me</h3>
+
+<div class="callout">
+  <strong><code>vt100</code> doesn't emit dirty regions.</strong> You walk every cell every frame. ratatui's own buffer diff (vs. previous frame) is what saves you — so you can be sloppy in the widget and still ship efficient terminal output. The two layers cover for each other.
+</div>
+<div class="callout">
+  <strong>Terminal cursor placement is separate from widget rendering.</strong> ratatui draws the frame; the OS cursor is a separate <code>set_cursor_position</code> call. cmdq has to decide every frame whether the cursor belongs in the queue input line or wherever vt100 says the inner shell put it.
+</div>
+<div class="callout">
+  <strong><code>--norc</code> overrides <code>--rcfile</code>.</strong> Bash arg order matters. Spent an embarrassing amount of time on a test that "couldn't see" the integration script before discovering this.
+</div>
+
+</section>
+
+<!-- ================================================================ -->
+<section id="general">
+<h2><span class="num">13</span>General software lessons</h2>
+
+<div class="lessons">
+  <div class="lesson">
+    <h5>Move up a layer</h5>
+    <p>If the layer you're trying to extend is fundamentally blocked from doing the thing you want (like a shell plugin during a foreground job), wrap it instead. tmux, debuggers, IDE terminals, containers — this is a recurring shape.</p>
+  </div>
+  <div class="lesson">
+    <h5>Don't infer what the source can tell you</h5>
+    <p>Parsing <code>PS1</code> regex is heuristic. Asking the shell to emit OSC 133 is correct. Whenever you find yourself writing detection logic, ask whether the system you're detecting <em>could just notify</em> instead.</p>
+  </div>
+  <div class="lesson">
+    <h5>Auto-detect &gt; manual toggle</h5>
+    <p>Alt-screen passthrough used to be Ctrl-\ only. Watching <code>alternate_screen()</code> made the right behavior the default; the manual toggle is now an escape hatch, not the primary UX.</p>
+  </div>
+  <div class="lesson">
+    <h5>Don't auto-fire after the user changed their mind</h5>
+    <p>Ctrl-C is a strong "abort" signal. Treating it as "and then do the next thing in the queue" is technically correct and emotionally wrong. Detect and pause.</p>
+  </div>
+  <div class="lesson">
+    <h5>Three-tier disclosure for keybindings</h5>
+    <p>Hint line (always visible) → overlay (one keypress away) → README (offline). Each tier has different verbosity. Beginners read tier 1; power users glance at tier 2; tire-kickers find tier 3.</p>
+  </div>
+  <div class="lesson">
+    <h5>Persist on mutation, not on tick</h5>
+    <p>Anything you do unconditionally inside a 60 Hz loop is suspect. A boolean dirty flag is almost always right.</p>
+  </div>
+  <div class="lesson">
+    <h5>Separate poll cadence from render cadence</h5>
+    <p>Input wants low latency (poll fast); rendering wants steady frame rate (gate). Conflating them — "redraw whenever anything changed" — produces both jitter and waste.</p>
+  </div>
+  <div class="lesson">
+    <h5>Idempotent install hooks</h5>
+    <p><code># &gt;&gt;&gt; cmdq integration &gt;&gt;&gt;</code> / <code># &lt;&lt;&lt;</code> markers in user rc files mean reinstall is a no-op and uninstall is a delete-between-markers. Never assume your install will only run once.</p>
+  </div>
+  <div class="lesson">
+    <h5>Don't edit user dotfiles silently</h5>
+    <p>Synthesize a temporary one (ZDOTDIR / BASH_ENV) for the in-process case; offer an explicit <code>--install-integration</code> for the durable case. Making the destructive path opt-in builds trust.</p>
+  </div>
+  <div class="lesson">
+    <h5>Test what you ship</h5>
+    <p>If your test harness builds something different from your release artifact, your tests are testing a fiction. Use the cargo binary path for end-to-end tests.</p>
+  </div>
+  <div class="lesson">
+    <h5>Make state explicit</h5>
+    <p><code>AppState</code> with named fields beats ten <code>&amp;mut</code> arguments. The struct documents the system; the arg list documents one function.</p>
+  </div>
+  <div class="lesson">
+    <h5>Two flags can mean two things</h5>
+    <p><code>manual_passthrough</code> + <code>auto_passthrough</code> looked redundant — but they encode different intent: "user asked for it" vs "program forced it". Combining them would make alt-screen exit clobber the user's deliberate choice.</p>
+  </div>
+  <div class="lesson">
+    <h5>Code review is a cheap pass</h5>
+    <p>Three review agents (reuse, quality, efficiency) run in parallel found the per-tick disk write, dead code, and a handful of needless allocations. None were caught by tests; all were trivial to fix.</p>
+  </div>
+  <div class="lesson">
+    <h5>Keep escape hatches</h5>
+    <p>Auto-passthrough is great — until it's wrong. <code>Ctrl-Q</code> for force-queue, <code>Ctrl-\</code> for manual passthrough. The smart default doesn't have to be the only option.</p>
+  </div>
+  <div class="lesson">
+    <h5>UI that doesn't flicker is UI that disappears</h5>
+    <p>The 1.5 s grace period before the queue panel appears removes a class of "wait, what just flashed?" interruptions for the 99% of commands that finish quickly. The right amount of UI for an instant command is none.</p>
+  </div>
+</div>
+
+</section>
+
+<hr>
+
+<footer>
+  cmdq · MIT · ~3,000 lines of Rust · 51 tests · clippy-clean
+</footer>
+
+</div>
+</body>
+</html>
