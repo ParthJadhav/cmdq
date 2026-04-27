@@ -1,6 +1,6 @@
 [package]
 name = "cmdq"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "A PTY-hosted command queue: type the next command while one is still running."
@@ -43,6 +43,11 @@ tempfile = "3"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [lib]
 name = "cmdq"

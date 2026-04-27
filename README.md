@@ -26,7 +26,23 @@ In a normal terminal, when a command is running:
 
 ## Installation
 
-### From crates.io (recommended)
+### Shell (macOS & Linux) — recommended
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ParthJadhav/cmdq/releases/latest/download/cmdq-installer.sh | sh
+```
+
+Detects your OS / CPU, downloads the matching pre-built binary, and drops it
+in `~/.cargo/bin` (or wherever `CARGO_HOME` points). No Rust toolchain
+required.
+
+### Homebrew (macOS & Linux)
+
+```bash
+brew install ParthJadhav/tap/cmdq
+```
+
+### From crates.io
 
 ```bash
 cargo install cmdq
@@ -34,16 +50,11 @@ cargo install cmdq
 
 Requires Rust **1.88+** (edition 2024).
 
-### Pre-built binaries
+### Manual download
 
-Download the latest binary for your platform from the
-[releases page](https://github.com/ParthJadhav/cmdq/releases).
-
-```bash
-# macOS / Linux example
-curl -L https://github.com/ParthJadhav/cmdq/releases/latest/download/cmdq-$(uname -s)-$(uname -m).tar.gz | tar xz
-sudo mv cmdq /usr/local/bin/
-```
+Grab the platform tarball from the
+[latest release](https://github.com/ParthJadhav/cmdq/releases/latest)
+and put `cmdq` somewhere on your `PATH`.
 
 ### From source
 

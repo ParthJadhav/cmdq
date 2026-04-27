@@ -1,0 +1,24 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.28.7"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+# (no powershell: cmdq depends on `nix` and is Unix-only)
+installers = ["shell", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+# Homebrew tap (separate repo) where the auto-generated formula is pushed
+tap = "ParthJadhav/homebrew-tap"
+# Publish jobs to run after release: pushes the formula to the tap above
+publish-jobs = ["homebrew"]
