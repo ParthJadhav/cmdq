@@ -22,3 +22,9 @@ install-updater = false
 tap = "ParthJadhav/homebrew-tap"
 # Publish jobs to run after release: pushes the formula to the tap above
 publish-jobs = ["homebrew"]
+# Override macOS runners: dist 0.28 still defaults to macos-13 which GitHub
+# retired in Dec 2025. macos-latest (Apple Silicon) builds arm64 natively
+# and cross-compiles x86_64 fine.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-latest"
+x86_64-apple-darwin = "macos-latest"
