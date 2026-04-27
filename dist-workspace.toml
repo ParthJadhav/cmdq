@@ -18,6 +18,10 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# We hand-edit release.yml to fix the publish-homebrew-formula auth bug
+# (persist-credentials: false strips the token before `git push`). Without
+# allow-dirty, `dist generate` would clobber that fix.
+allow-dirty = ["ci"]
 # Homebrew tap (separate repo) where the auto-generated formula is pushed
 tap = "ParthJadhav/homebrew-tap"
 # Publish jobs to run after release: pushes the formula to the tap above

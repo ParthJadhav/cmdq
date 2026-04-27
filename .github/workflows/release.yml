@@ -293,7 +293,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
+          # `git push` later in this job needs the auth header to remain
+          # in .git/config; persist-credentials: false strips it after
+          # fetch and breaks the push.
+          persist-credentials: true
           repository: "ParthJadhav/homebrew-tap"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       # So we have access to the formula

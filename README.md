@@ -206,7 +206,8 @@ so quick commands (`ls`, `cd`) don't flash UI. Press **F1** or **?** any time
 the panel is visible for a full help overlay.
 
 > **Note:** while the queue panel is open, **↑** recalls items from the
-> *queue*, not your shell history. Exit with `Ctrl-\` if you need shell history.
+> *queue*, not your shell history. Exit with `Ctrl-\` (or double-tap `Esc`)
+> if you need shell history or want to scroll a pager (`git diff`, `less`).
 
 **Add to queue**
 
@@ -240,6 +241,7 @@ the panel is visible for a full help overlay.
 |-----|--------|
 | Ctrl-Q | force the panel open even at the shell prompt |
 | Ctrl-\\ | raw input — keys go straight to the running app |
+| Esc Esc | raw input (SSH-safe alternative to Ctrl-\\); double-tap again to return |
 
 **Misc**
 

@@ -339,6 +339,7 @@ pub fn render_help(f: &mut Frame<'_>) {
         section("modes"),
         row("Ctrl-Q", "force the panel open even at the shell prompt"),
         row("Ctrl-\\", "raw input — keys go straight to the running app"),
+        row("Esc Esc", "raw input (SSH-safe alternative to Ctrl-\\)"),
         Line::from(""),
         section("misc"),
         row("Ctrl-C", "send SIGINT to running command (pauses queue)"),

@@ -55,6 +55,10 @@ const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 /// header isn't a permanent log of the last action.
 const STATUS_TTL: Duration = Duration::from_secs(2);
 
+/// Two Esc presses within this window toggle raw-input passthrough. SSH-safe
+/// alternative to Ctrl-\, which terminals/SSH often eat or remap to SIGQUIT.
+const ESC_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
+
 const RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const ETX: u8 = 0x03;
 
@@ -75,6 +79,9 @@ struct AppState {
     /// Timestamp of first Ctrl-D when queue was non-empty; second within
     /// QUIT_CONFIRM_WINDOW actually quits.
     pending_quit_at: Option<Instant>,
+    /// Timestamp of the most recent bare-Esc press; a second Esc within
+    /// ESC_DOUBLE_TAP_WINDOW toggles passthrough.
+    last_esc_at: Option<Instant>,
     /// Has the user pressed Tab (chain toggle) at least once this session?
     /// First press shows an explanatory status; subsequent presses are terse.
     chain_seen: bool,
@@ -133,7 +140,7 @@ impl AppState {
     fn toggle_manual_passthrough(&mut self) {
         self.manual_passthrough = !self.manual_passthrough;
         let msg = if self.manual_passthrough {
-            "raw input: keys go to the running app (Ctrl-\\ to exit)"
+            "raw input: keys go to the running app (Esc Esc / Ctrl-\\ to exit)"
         } else {
             "raw input off"
         };
@@ -233,6 +240,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         last_sigint_at: None,
         command_started_at: None,
         pending_quit_at: None,
+        last_esc_at: None,
         chain_seen: false,
         status: String::new(),
         status_set_at: None,
@@ -425,6 +433,31 @@ fn handle_key(
     if matches!(key.code, KeyCode::F(1)) {
         state.show_help = true;
         return KeyOutcome::Continue;
+    }
+
+    // Double-Esc toggles passthrough — SSH-safe alternative to Ctrl-\, which
+    // some terminals/SSH paths swallow or remap to SIGQUIT. Only Press counts:
+    // key-repeat from a held Esc shouldn't fire a toggle every frame. The
+    // first Esc still falls through to its existing behavior (cancel edit /
+    // forward to child); the second within the window swallows itself and
+    // flips the mode.
+    if matches!(key.code, KeyCode::Esc)
+        && !ctrl
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && key.kind == KeyEventKind::Press
+    {
+        let now = Instant::now();
+        let double_tap = state
+            .last_esc_at
+            .map(|t| now.duration_since(t) <= ESC_DOUBLE_TAP_WINDOW)
+            .unwrap_or(false);
+        if double_tap {
+            state.last_esc_at = None;
+            state.toggle_manual_passthrough();
+            return KeyOutcome::Continue;
+        }
+        state.last_esc_at = Some(now);
+        // fall through so the first Esc behaves normally
     }
 
     let in_queue = state.in_queue_mode();
@@ -731,6 +764,7 @@ pub(crate) mod tests {
             last_sigint_at: None,
             command_started_at: None,
             pending_quit_at: None,
+            last_esc_at: None,
             chain_seen: false,
             status: String::new(),
             status_set_at: None,
@@ -865,5 +899,56 @@ pub(crate) mod tests {
         assert!(s.command_long_running());
         s.command_started_at = None;
         assert!(!s.command_long_running());
+    }
+
+    fn esc_press() -> KeyEvent {
+        use crossterm::event::KeyCode;
+        let mut k = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        k.kind = KeyEventKind::Press;
+        k
+    }
+
+    #[test]
+    fn double_esc_toggles_passthrough() {
+        let mut s = make_state();
+        // Force queue mode so the first Esc is handled by the editor path
+        // (its existing reset behavior is fine; we only care about the toggle).
+        s.force_queue = true;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+
+        assert!(!s.manual_passthrough);
+        let _ = handle_key(esc_press(), &mut s, &mut w);
+        assert!(!s.manual_passthrough, "single Esc must not toggle");
+        assert!(s.last_esc_at.is_some());
+
+        let _ = handle_key(esc_press(), &mut s, &mut w);
+        assert!(s.manual_passthrough, "second Esc within window toggles");
+        assert!(
+            s.last_esc_at.is_none(),
+            "timestamp cleared so a 3rd quick Esc starts a fresh window"
+        );
+
+        // And a fresh double-tap toggles back to queue mode.
+        let _ = handle_key(esc_press(), &mut s, &mut w);
+        let _ = handle_key(esc_press(), &mut s, &mut w);
+        assert!(!s.manual_passthrough, "double-Esc again returns to queue mode");
+    }
+
+    #[test]
+    fn esc_outside_window_does_not_toggle() {
+        let mut s = make_state();
+        s.force_queue = true;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+
+        let _ = handle_key(esc_press(), &mut s, &mut w);
+        // Backdate the first Esc beyond the window.
+        s.last_esc_at = Some(Instant::now() - ESC_DOUBLE_TAP_WINDOW - Duration::from_millis(50));
+        let _ = handle_key(esc_press(), &mut s, &mut w);
+        assert!(
+            !s.manual_passthrough,
+            "second Esc outside window must not toggle"
+        );
     }
 }
