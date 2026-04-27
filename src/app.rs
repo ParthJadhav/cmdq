@@ -932,7 +932,10 @@ pub(crate) mod tests {
         // And a fresh double-tap toggles back to queue mode.
         let _ = handle_key(esc_press(), &mut s, &mut w);
         let _ = handle_key(esc_press(), &mut s, &mut w);
-        assert!(!s.manual_passthrough, "double-Esc again returns to queue mode");
+        assert!(
+            !s.manual_passthrough,
+            "double-Esc again returns to queue mode"
+        );
     }
 
     #[test]
