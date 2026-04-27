@@ -96,14 +96,12 @@ fn dispatches_queued_commands_after_running_one() {
             accum.extend_from_slice(&b);
             for ev in detector.feed(&b) {
                 match ev {
-                    Event::PromptStart => {
-                        if !wrote_initial {
-                            wrote_initial = true;
-                            // Run a slow-ish first command. The queue should
-                            // dispatch when this finishes.
-                            writer.write_all(b"sleep 0.2; echo INITIAL_DONE\n").unwrap();
-                            writer.flush().unwrap();
-                        }
+                    Event::PromptStart if !wrote_initial => {
+                        wrote_initial = true;
+                        // Run a slow-ish first command. The queue should
+                        // dispatch when this finishes.
+                        writer.write_all(b"sleep 0.2; echo INITIAL_DONE\n").unwrap();
+                        writer.flush().unwrap();
                     }
                     Event::CommandEnd { exit_code } => {
                         if !queue.is_empty()
@@ -212,12 +210,10 @@ fn conditional_skips_after_failure() {
             accum.extend_from_slice(&b);
             for ev in detector.feed(&b) {
                 match ev {
-                    Event::PromptStart => {
-                        if !wrote_initial {
-                            wrote_initial = true;
-                            writer.write_all(b"false\n").unwrap();
-                            writer.flush().unwrap();
-                        }
+                    Event::PromptStart if !wrote_initial => {
+                        wrote_initial = true;
+                        writer.write_all(b"false\n").unwrap();
+                        writer.flush().unwrap();
                     }
                     Event::CommandEnd { exit_code } => {
                         if !queue.is_empty()

@@ -2,7 +2,7 @@
 name = "cmdq"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A PTY-hosted command queue: type the next command while one is still running."
 license = "MIT"
 authors = ["Parth Jadhav"]

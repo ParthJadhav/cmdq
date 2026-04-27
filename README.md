@@ -32,7 +32,7 @@ In a normal terminal, when a command is running:
 cargo install cmdq
 ```
 
-Requires Rust **1.85+** (edition 2024).
+Requires Rust **1.88+** (edition 2024).
 
 ### Pre-built binaries
 
