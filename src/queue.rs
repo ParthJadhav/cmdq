@@ -127,9 +127,8 @@ impl Queue {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("creating queue parent dir {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating queue parent dir {}", parent.display()))?;
         }
         let tmp = path.with_extension("json.tmp");
         let data = serde_json::to_vec(self)?;

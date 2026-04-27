@@ -49,10 +49,7 @@ pub fn render(
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(panel_height),
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(panel_height)])
         .split(area);
 
     let shell_area = chunks[0];
@@ -170,25 +167,75 @@ fn render_panel(f: &mut Frame<'_>, area: Rect, qview: &QueueViewState<'_>) {
     ]);
     f.render_widget(Paragraph::new(input_line), chunks[2]);
 
-    let hint_text = build_hint_line(qview);
-    let hints = Line::from(vec![Span::styled(
-        hint_text,
-        Style::default().fg(Color::DarkGray),
-    )]);
+    let hints = build_hint_line(qview);
     f.render_widget(Paragraph::new(hints), chunks[3]);
 }
 
-fn build_hint_line(qview: &QueueViewState<'_>) -> String {
+fn chip(key: &str, label: &str) -> Vec<Span<'static>> {
+    let bracket = Style::default().fg(Color::DarkGray);
+    let key_style = Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(Color::Gray);
+    vec![
+        Span::styled("[", bracket),
+        Span::styled(key.to_string(), key_style),
+        Span::styled(format!(" {label}"), label_style),
+        Span::styled("]", bracket),
+    ]
+}
+
+fn build_hint_line(qview: &QueueViewState<'_>) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let sep = || Span::styled("  ·  ", dim);
+    let gap = || Span::raw(" ");
+
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+
     if qview.pending_quit {
-        return " ^D again to quit · any other key to keep working ".to_string();
+        spans.extend(chip("^D", "again to quit"));
+        spans.push(sep());
+        spans.push(Span::styled(
+            "any other key keeps working",
+            Style::default().fg(Color::Gray),
+        ));
+        return Line::from(spans);
     }
+
     if qview.editing_index.is_some() {
-        return " Esc cancel · Enter save · ^D delete · Alt-↑/↓ reorder · Tab chain ".to_string();
+        spans.extend(chip("Esc", "cancel"));
+        spans.push(gap());
+        spans.extend(chip("⏎", "save"));
+        spans.push(gap());
+        spans.extend(chip("^D", "delete"));
+        spans.push(gap());
+        spans.extend(chip("Alt-↑↓", "reorder"));
+        spans.push(gap());
+        spans.extend(chip("⇥", "chain"));
+        return Line::from(spans);
     }
-    let pause_or_resume = if qview.queue.paused { "^X resume" } else { "^X pause" };
-    format!(
-        " F1 help · Enter add · ↑ edit · Tab chain · {pause_or_resume} · ^K clear all · ^\\ raw input "
-    )
+
+    let pause_label = if qview.queue.paused {
+        "resume"
+    } else {
+        "pause"
+    };
+
+    spans.extend(chip("⏎", "add"));
+    spans.push(gap());
+    spans.extend(chip("↑", "edit"));
+    spans.push(gap());
+    spans.extend(chip("⇥", "chain"));
+    spans.push(sep());
+    spans.extend(chip("^X", pause_label));
+    spans.push(gap());
+    spans.extend(chip("^K", "clear"));
+    spans.push(gap());
+    spans.extend(chip("^\\", "raw"));
+    spans.push(sep());
+    spans.extend(chip("?", "help"));
+
+    Line::from(spans)
 }
 
 fn build_header(qview: &QueueViewState<'_>, width: u16) -> Line<'static> {
@@ -220,7 +267,12 @@ pub fn render_help(f: &mut Frame<'_>) {
     let height = area.height.saturating_sub(2).clamp(20, 32);
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect { x, y, width, height };
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     f.render_widget(Clear, popup);
 
@@ -294,7 +346,9 @@ pub fn render_help(f: &mut Frame<'_>) {
         row("F1 / ?", "show this help · Esc / Enter dismisses"),
     ];
 
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(para, popup);
 }
 

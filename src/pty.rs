@@ -10,9 +10,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use portable_pty::{
-    Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system,
-};
+use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
 use crate::shell_integration::{ShellKind, write_integration_script};
 
@@ -58,9 +56,10 @@ impl ShellPty {
             ShellKind::Zsh => {
                 cmd.arg("-i");
                 if let Some(script) = &integration_script
-                    && let Some(zdotdir) = prepare_zdotdir(script) {
-                        cmd.env("ZDOTDIR", zdotdir);
-                    }
+                    && let Some(zdotdir) = prepare_zdotdir(script)
+                {
+                    cmd.env("ZDOTDIR", zdotdir);
+                }
             }
             ShellKind::Bash => {
                 cmd.arg("-i");

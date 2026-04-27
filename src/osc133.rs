@@ -4,7 +4,7 @@
 //!   ESC ] 133 ; A ST   -- prompt start
 //!   ESC ] 133 ; B ST   -- prompt end / command input start
 //!   ESC ] 133 ; C ST   -- pre-execution (user pressed Enter)
-//!   ESC ] 133 ; D[;ec] ST -- command finished, optional exit code
+//!   ESC ] 133 ; D\[;ec\] ST -- command finished, optional exit code
 //!
 //! ST may be either BEL (0x07) or ESC \ (0x1B 0x5C).
 //!
@@ -75,7 +75,11 @@ impl Detector {
     fn step(&mut self, b: u8, out: &mut Vec<Event>) {
         self.state = match self.state {
             State::Normal => {
-                if b == ESC { State::AfterEsc } else { State::Normal }
+                if b == ESC {
+                    State::AfterEsc
+                } else {
+                    State::Normal
+                }
             }
             State::AfterEsc => match b {
                 b']' => {
@@ -155,7 +159,9 @@ mod tests {
     fn detects_command_end_with_nonzero_exit() {
         assert_eq!(
             events(b"\x1b]133;D;127\x07"),
-            vec![Event::CommandEnd { exit_code: Some(127) }]
+            vec![Event::CommandEnd {
+                exit_code: Some(127)
+            }]
         );
     }
 
@@ -205,7 +211,8 @@ mod tests {
 
     #[test]
     fn full_cycle_sequence() {
-        let bytes = b"\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07file1 file2\n\x1b]133;D;0\x07";
+        let bytes =
+            b"\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07file1 file2\n\x1b]133;D;0\x07";
         assert_eq!(
             events(bytes),
             vec![

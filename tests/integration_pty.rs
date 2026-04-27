@@ -102,7 +102,11 @@ fn bash_integration_emits_osc133_markers() {
         "did not see initial prompt"
     );
     let saw_prompt_start = accum.windows(7).any(|w| w == b"\x1b]133;A");
-    assert!(saw_prompt_start, "expected 133;A marker before first prompt; got {} bytes", accum.len());
+    assert!(
+        saw_prompt_start,
+        "expected 133;A marker before first prompt; got {} bytes",
+        accum.len()
+    );
 
     // Run a command.
     writer.write_all(b"echo hello-cmdq\n").unwrap();
@@ -121,7 +125,9 @@ fn bash_integration_emits_osc133_markers() {
     assert!(saw_start, "expected 133;C marker for command start");
     assert!(saw_end, "expected 133;D marker for command end");
     assert!(
-        accum.windows(b"hello-cmdq".len()).any(|w| w == b"hello-cmdq"),
+        accum
+            .windows(b"hello-cmdq".len())
+            .any(|w| w == b"hello-cmdq"),
         "expected command output 'hello-cmdq' in stream"
     );
 
@@ -143,10 +149,7 @@ fn detector_picks_up_real_shell_markers() {
     let rcfile = integration_path.parent().unwrap().join("bashrc-detector");
     std::fs::write(
         &rcfile,
-        format!(
-            "PS1='$ '\nsource \"{}\"\n",
-            integration_path.display()
-        ),
+        format!("PS1='$ '\nsource \"{}\"\n", integration_path.display()),
     )
     .unwrap();
 
@@ -214,21 +217,20 @@ fn detector_picks_up_real_shell_markers() {
                 events.push(ev);
             }
         }
-        if events
-            .iter()
-            .any(|e| matches!(e, Event::CommandEnd { .. }))
-        {
+        if events.iter().any(|e| matches!(e, Event::CommandEnd { .. })) {
             break;
         }
     }
 
-    let saw_start = events
-        .iter()
-        .any(|e| matches!(e, Event::CommandStart));
+    let saw_start = events.iter().any(|e| matches!(e, Event::CommandStart));
     let saw_end_zero = events
         .iter()
         .any(|e| matches!(e, Event::CommandEnd { exit_code: Some(0) }));
-    assert!(saw_start, "detector missed CommandStart; events: {:?}", events);
+    assert!(
+        saw_start,
+        "detector missed CommandStart; events: {:?}",
+        events
+    );
     assert!(
         saw_end_zero,
         "detector missed CommandEnd exit=0; events: {:?}",

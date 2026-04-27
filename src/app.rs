@@ -8,14 +8,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event as CtEvent, KeyEvent, KeyEventKind, KeyModifiers,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event as CtEvent, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -99,8 +97,7 @@ impl AppState {
     }
 
     fn in_queue_mode(&self) -> bool {
-        !self.effective_passthrough()
-            && (self.command_long_running() || self.force_queue)
+        !self.effective_passthrough() && (self.command_long_running() || self.force_queue)
     }
 
     fn pending_quit_active(&self) -> bool {
@@ -253,9 +250,9 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                     // vt100 0.16 has a few unwrap()s in its escape-sequence
                     // handling that can panic on unusual byte streams. We'd
                     // rather drop a malformed chunk than take down cmdq.
-                    let _ = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| parser.process(&bytes)),
-                    );
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        parser.process(&bytes)
+                    }));
                     let evs = osc.feed(&bytes);
                     for ev in evs {
                         match ev {
@@ -312,9 +309,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                     let _ = pty.resize(cw, rh);
                 }
                 CtEvent::Key(key) => {
-                    if key.kind != KeyEventKind::Press
-                        && key.kind != KeyEventKind::Repeat
-                    {
+                    if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                         continue;
                     }
                     match handle_key(key, &mut state, &mut writer) {
@@ -380,9 +375,7 @@ fn handle_command_end(
         state.queue.paused = true;
         state.last_sigint_at = None;
         state.queue_dirty = true;
-        state.set_status(
-            "Ctrl-C detected — queue paused. Ctrl-X to resume, Ctrl-K to clear.",
-        );
+        state.set_status("Ctrl-C detected — queue paused. Ctrl-X to resume, Ctrl-K to clear.");
         return;
     }
     state.last_sigint_at = None;
@@ -395,7 +388,10 @@ fn handle_command_end(
         let _ = writer.write_all(b"\n");
         let _ = writer.flush();
         state.queue_dirty = true;
-        state.set_status(format!("dispatched: {}", truncate_for_status(&item.command)));
+        state.set_status(format!(
+            "dispatched: {}",
+            truncate_for_status(&item.command)
+        ));
     }
 }
 
@@ -416,11 +412,7 @@ fn handle_key(
     if state.show_help {
         let dismiss = matches!(
             key.code,
-            KeyCode::Esc
-                | KeyCode::Enter
-                | KeyCode::Char(' ')
-                | KeyCode::Char('?')
-                | KeyCode::F(1)
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('?') | KeyCode::F(1)
         );
         if dismiss {
             state.show_help = false;
@@ -505,12 +497,19 @@ fn handle_key(
             let _ = writer.write_all(&bytes);
             let _ = writer.flush();
         }
-        InputAction::EnqueueCurrent { command, conditional } => {
+        InputAction::EnqueueCurrent {
+            command,
+            conditional,
+        } => {
             state.queue.push(&command, conditional);
             state.queue_dirty = true;
             state.set_status(format!("added: {}", truncate_for_status(&command)));
         }
-        InputAction::CommitEdit { index, command, conditional } => {
+        InputAction::CommitEdit {
+            index,
+            command,
+            conditional,
+        } => {
             if let Some(id) = state.queue.items().get(index).map(|it| it.id) {
                 state.queue.edit(id, &command);
                 state.queue.set_conditional(id, conditional);
@@ -527,7 +526,10 @@ fn handle_key(
                 && let Some(removed) = state.queue.remove(id)
             {
                 state.queue_dirty = true;
-                state.set_status(format!("removed: {}", truncate_for_status(&removed.command)));
+                state.set_status(format!(
+                    "removed: {}",
+                    truncate_for_status(&removed.command)
+                ));
             }
             state.editor.reset();
         }
@@ -611,7 +613,7 @@ fn handle_paste(text: String, state: &mut AppState, writer: &mut Box<dyn Write +
     // single-line buffer makes sense, then drop into the input buffer where
     // the user can review and Enter to commit.
     let normalized: String = text
-        .split(|c| c == '\n' || c == '\r')
+        .split(['\n', '\r'])
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("; ");
@@ -859,8 +861,7 @@ pub(crate) mod tests {
     #[test]
     fn command_end_clears_long_running_flag() {
         let mut s = make_state();
-        s.command_started_at =
-            Some(Instant::now() - QUEUE_PANEL_DELAY - Duration::from_millis(50));
+        s.command_started_at = Some(Instant::now() - QUEUE_PANEL_DELAY - Duration::from_millis(50));
         assert!(s.command_long_running());
         s.command_started_at = None;
         assert!(!s.command_long_running());

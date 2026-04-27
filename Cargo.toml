@@ -2,9 +2,23 @@
 name = "cmdq"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A PTY-hosted command queue: type the next command while one is still running."
 license = "MIT"
 authors = ["Parth Jadhav"]
+repository = "https://github.com/ParthJadhav/cmdq"
+homepage = "https://github.com/ParthJadhav/cmdq"
+documentation = "https://docs.rs/cmdq"
+readme = "README.md"
+keywords = ["terminal", "tui", "pty", "shell", "queue"]
+categories = ["command-line-utilities", "command-line-interface"]
+exclude = [
+    "/.github",
+    "/docs",
+    "/target",
+    "/tests/snapshots",
+    "*.html",
+]
 
 [dependencies]
 portable-pty = "0.9"

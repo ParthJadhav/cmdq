@@ -47,7 +47,10 @@ fn binary_starts_and_exits_cleanly_with_bash() {
     cmd.arg("/bin/bash");
     cmd.env("TERM", "xterm-256color");
     // Don't inherit broken/test-runner env that might confuse bash.
-    cmd.env("HOME", std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()));
+    cmd.env(
+        "HOME",
+        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+    );
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
@@ -127,11 +130,7 @@ fn binary_queues_command_via_force_queue_then_dispatches() {
     let tmp = std::env::temp_dir().join(format!("cmdq-smoke-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let int_path = tmp.join("integration.bash");
-    std::fs::write(
-        &int_path,
-        include_str!("../shell/integration.bash"),
-    )
-    .unwrap();
+    std::fs::write(&int_path, include_str!("../shell/integration.bash")).unwrap();
     let bashrc = tmp.join(".bashrc");
     std::fs::write(
         &bashrc,

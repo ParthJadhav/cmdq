@@ -26,7 +26,13 @@ fn write_temp_files(suffix: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     (int_path, rcfile)
 }
 
-fn spawn_bash(rcfile: &std::path::Path) -> (Box<dyn Read + Send>, Box<dyn Write + Send>, Box<dyn portable_pty::Child + Send + Sync>) {
+fn spawn_bash(
+    rcfile: &std::path::Path,
+) -> (
+    Box<dyn Read + Send>,
+    Box<dyn Write + Send>,
+    Box<dyn portable_pty::Child + Send + Sync>,
+) {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -101,19 +107,28 @@ fn dispatches_queued_commands_after_running_one() {
                     }
                     Event::CommandEnd { exit_code } => {
                         if !queue.is_empty()
-                            && let Some(item) = queue.pop_next_eligible(exit_code) {
-                                writer.write_all(item.command.as_bytes()).unwrap();
-                                writer.write_all(b"\n").unwrap();
-                                writer.flush().unwrap();
-                            }
+                            && let Some(item) = queue.pop_next_eligible(exit_code)
+                        {
+                            writer.write_all(item.command.as_bytes()).unwrap();
+                            writer.write_all(b"\n").unwrap();
+                            writer.flush().unwrap();
+                        }
                     }
                     _ => {}
                 }
             }
         }
 
-        if accum.windows(b"QUEUED_SECOND".len()).filter(|w| *w == b"QUEUED_SECOND").count() > 0
-            && accum.windows(b"QUEUED_FIRST".len()).filter(|w| *w == b"QUEUED_FIRST").count() > 0
+        if accum
+            .windows(b"QUEUED_SECOND".len())
+            .filter(|w| *w == b"QUEUED_SECOND")
+            .count()
+            > 0
+            && accum
+                .windows(b"QUEUED_FIRST".len())
+                .filter(|w| *w == b"QUEUED_FIRST")
+                .count()
+                > 0
         {
             break;
         }
@@ -127,8 +142,14 @@ fn dispatches_queued_commands_after_running_one() {
     // Each output should appear at least twice — once as the typed echo'd
     // input, once as the actual `echo` output. We just check >=1.
     assert!(s.contains("INITIAL_DONE"), "missing initial command output");
-    assert!(s.contains("QUEUED_FIRST"), "first queued command did not run");
-    assert!(s.contains("QUEUED_SECOND"), "second queued command did not run");
+    assert!(
+        s.contains("QUEUED_FIRST"),
+        "first queued command did not run"
+    );
+    assert!(
+        s.contains("QUEUED_SECOND"),
+        "second queued command did not run"
+    );
     assert!(queue.is_empty(), "queue not drained");
     // Order: INITIAL_DONE before QUEUED_FIRST before QUEUED_SECOND in output.
     let pos_initial = s.find("INITIAL_DONE").unwrap();
@@ -144,8 +165,14 @@ fn dispatches_queued_commands_after_running_one() {
     };
     let pos_first = echoes_only("QUEUED_FIRST", &s).unwrap();
     let pos_second = echoes_only("QUEUED_SECOND", &s).unwrap();
-    assert!(pos_initial < pos_first, "INITIAL should come before QUEUED_FIRST");
-    assert!(pos_first < pos_second, "QUEUED_FIRST should come before QUEUED_SECOND");
+    assert!(
+        pos_initial < pos_first,
+        "INITIAL should come before QUEUED_FIRST"
+    );
+    assert!(
+        pos_first < pos_second,
+        "QUEUED_FIRST should come before QUEUED_SECOND"
+    );
 }
 
 #[test]
@@ -194,11 +221,12 @@ fn conditional_skips_after_failure() {
                     }
                     Event::CommandEnd { exit_code } => {
                         if !queue.is_empty()
-                            && let Some(item) = queue.pop_next_eligible(exit_code) {
-                                writer.write_all(item.command.as_bytes()).unwrap();
-                                writer.write_all(b"\n").unwrap();
-                                writer.flush().unwrap();
-                            }
+                            && let Some(item) = queue.pop_next_eligible(exit_code)
+                        {
+                            writer.write_all(item.command.as_bytes()).unwrap();
+                            writer.write_all(b"\n").unwrap();
+                            writer.flush().unwrap();
+                        }
                     }
                     _ => {}
                 }
@@ -214,7 +242,14 @@ fn conditional_skips_after_failure() {
     let _ = child.wait();
 
     let s = String::from_utf8_lossy(&accum);
-    assert!(s.contains("ALWAYS_RUNS"), "ALWAYS_RUNS missing in output: {}", s);
+    assert!(
+        s.contains("ALWAYS_RUNS"),
+        "ALWAYS_RUNS missing in output: {}",
+        s
+    );
     // SHOULD_NOT_RUN should never have been written to the PTY.
-    assert!(!s.contains("SHOULD_NOT_RUN"), "conditional command was not skipped");
+    assert!(
+        !s.contains("SHOULD_NOT_RUN"),
+        "conditional command was not skipped"
+    );
 }

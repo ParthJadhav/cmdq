@@ -75,8 +75,7 @@ pub fn integration_script_path(shell: ShellKind) -> Result<PathBuf> {
         .or_else(dirs::home_dir)
         .ok_or_else(|| anyhow!("could not locate home/data dir"))?;
     let dir = dir.join("cmdq");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir.join(match shell {
         ShellKind::Zsh => "integration.zsh",
         ShellKind::Bash | ShellKind::Sh => "integration.bash",
@@ -94,16 +93,19 @@ pub fn write_integration_script(shell: ShellKind) -> Result<PathBuf> {
 
 /// Install the integration into the user's rc file (idempotent).
 pub fn install_for_current_shell() -> Result<String> {
-    let shell_path = current_shell()
-        .ok_or_else(|| anyhow!("$SHELL is not set; pass --shell explicitly"))?;
+    let shell_path =
+        current_shell().ok_or_else(|| anyhow!("$SHELL is not set; pass --shell explicitly"))?;
     let kind = ShellKind::detect_from_path(&shell_path);
     let script = write_integration_script(kind)?;
-    let rc =
-        rc_file_for(kind).ok_or_else(|| anyhow!("could not determine rc file location"))?;
+    let rc = rc_file_for(kind).ok_or_else(|| anyhow!("could not determine rc file location"))?;
 
     let source_line = match kind {
         ShellKind::Fish => format!("source \"{}\"", script.display()),
-        _ => format!("[ -f \"{}\" ] && . \"{}\"", script.display(), script.display()),
+        _ => format!(
+            "[ -f \"{}\" ] && . \"{}\"",
+            script.display(),
+            script.display()
+        ),
     };
 
     let block = format!(
@@ -146,8 +148,14 @@ mod tests {
     #[test]
     fn detect_shell_kind() {
         assert_eq!(ShellKind::detect_from_path("/bin/zsh"), ShellKind::Zsh);
-        assert_eq!(ShellKind::detect_from_path("/usr/local/bin/bash"), ShellKind::Bash);
-        assert_eq!(ShellKind::detect_from_path("/opt/homebrew/bin/fish"), ShellKind::Fish);
+        assert_eq!(
+            ShellKind::detect_from_path("/usr/local/bin/bash"),
+            ShellKind::Bash
+        );
+        assert_eq!(
+            ShellKind::detect_from_path("/opt/homebrew/bin/fish"),
+            ShellKind::Fish
+        );
         assert_eq!(ShellKind::detect_from_path("/bin/sh"), ShellKind::Sh);
     }
 

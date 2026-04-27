@@ -13,9 +13,16 @@ pub enum InputAction {
     /// Forward these raw bytes to the PTY (ie. send to the running child).
     ForwardToChild(Vec<u8>),
     /// Enqueue a new command (committed from the input buffer).
-    EnqueueCurrent { command: String, conditional: bool },
+    EnqueueCurrent {
+        command: String,
+        conditional: bool,
+    },
     /// Commit an edit on the queue item at the given index.
-    CommitEdit { index: usize, command: String, conditional: bool },
+    CommitEdit {
+        index: usize,
+        command: String,
+        conditional: bool,
+    },
     /// Cancel the current edit (without removing the item).
     CancelEdit,
     /// Remove the item being edited.
@@ -34,7 +41,9 @@ pub enum InputAction {
     ToggleHelp,
     /// Toggle the chain ("conditional") flag on the in-progress draft/edit.
     /// `now_on` is the new state of the flag after the toggle.
-    ToggleChain { now_on: bool },
+    ToggleChain {
+        now_on: bool,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -213,7 +222,9 @@ impl LineEditor {
             }
             KeyCode::Tab => {
                 self.conditional = !self.conditional;
-                InputAction::ToggleChain { now_on: self.conditional }
+                InputAction::ToggleChain {
+                    now_on: self.conditional,
+                }
             }
             KeyCode::Enter => {
                 let cmd = self.buffer.trim().to_string();
