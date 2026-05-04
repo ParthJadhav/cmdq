@@ -118,6 +118,73 @@ impl LineEditor {
         self.buffer.replace_range(self.cursor..next, "");
     }
 
+    fn delete_previous_word(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = self.previous_word_start();
+        self.buffer.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    fn previous_word_start(&self) -> usize {
+        let mut start = self.cursor;
+        while start > 0 {
+            let prev = self.buffer[..start]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let ch = self.buffer[prev..start].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            start = prev;
+        }
+        while start > 0 {
+            let prev = self.buffer[..start]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let ch = self.buffer[prev..start].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            start = prev;
+        }
+        start
+    }
+
+    fn next_word_end(&self) -> usize {
+        let mut end = self.cursor;
+        while end < self.buffer.len() {
+            let next = self.buffer[end..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| end + i)
+                .unwrap_or(self.buffer.len());
+            let ch = self.buffer[end..next].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            end = next;
+        }
+        while end < self.buffer.len() {
+            let next = self.buffer[end..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| end + i)
+                .unwrap_or(self.buffer.len());
+            let ch = self.buffer[end..next].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            end = next;
+        }
+        end
+    }
+
     fn move_left(&mut self) {
         if self.cursor == 0 {
             return;
@@ -130,6 +197,14 @@ impl LineEditor {
             return;
         }
         self.cursor = self.next_boundary();
+    }
+
+    fn move_word_left(&mut self) {
+        self.cursor = self.previous_word_start();
+    }
+
+    fn move_word_right(&mut self) {
+        self.cursor = self.next_word_end();
     }
 
     /// Translate a key event into an InputAction. `queue` is consulted only
@@ -166,15 +241,41 @@ impl LineEditor {
                     self.cursor = self.buffer.len();
                     InputAction::Nothing
                 }
+                'b' | 'B' => {
+                    self.move_left();
+                    InputAction::Nothing
+                }
+                'f' | 'F' => {
+                    self.move_right();
+                    InputAction::Nothing
+                }
+                'h' | 'H' => {
+                    self.backspace();
+                    InputAction::Nothing
+                }
                 'u' | 'U' => {
                     // Kill back-to-start.
                     self.buffer.replace_range(..self.cursor, "");
                     self.cursor = 0;
                     InputAction::Nothing
                 }
+                'w' | 'W' => {
+                    self.delete_previous_word();
+                    InputAction::Nothing
+                }
                 _ => InputAction::Nothing,
             },
-            KeyCode::Char(_) if alt => InputAction::Nothing,
+            KeyCode::Char(c) if alt => match c {
+                'b' | 'B' => {
+                    self.move_word_left();
+                    InputAction::Nothing
+                }
+                'f' | 'F' => {
+                    self.move_word_right();
+                    InputAction::Nothing
+                }
+                _ => InputAction::Nothing,
+            },
             KeyCode::Char('?')
                 if !ctrl && self.buffer.is_empty() && self.editing_index.is_none() =>
             {
@@ -192,8 +293,16 @@ impl LineEditor {
                 self.delete_at_cursor();
                 InputAction::Nothing
             }
+            KeyCode::Left if alt => {
+                self.move_word_left();
+                InputAction::Nothing
+            }
             KeyCode::Left => {
                 self.move_left();
+                InputAction::Nothing
+            }
+            KeyCode::Right if alt => {
+                self.move_word_right();
                 InputAction::Nothing
             }
             KeyCode::Right => {
@@ -307,6 +416,14 @@ mod tests {
         KeyEvent {
             code: KeyCode::Char(c),
             modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::ALT,
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }
@@ -433,6 +550,116 @@ mod tests {
         let q = Queue::new();
         let action = ed.handle_key(ctrl('k'), &q);
         assert_eq!(action, InputAction::ClearQueue);
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_move_cursor() {
+        let mut ed = LineEditor::new();
+        let q = Queue::new();
+        ed.insert_str("ac");
+
+        let left = ed.handle_key(ctrl('b'), &q);
+        let insert = ed.handle_key(key(KeyCode::Char('b')), &q);
+        let right = ed.handle_key(ctrl('f'), &q);
+        let append = ed.handle_key(key(KeyCode::Char('d')), &q);
+
+        assert_eq!(left, InputAction::Nothing);
+        assert_eq!(insert, InputAction::Nothing);
+        assert_eq!(right, InputAction::Nothing);
+        assert_eq!(append, InputAction::Nothing);
+        assert_eq!(ed.buffer, "abcd");
+        assert_eq!(ed.cursor, ed.buffer.len());
+    }
+
+    #[test]
+    fn ctrl_h_backspaces_previous_char() {
+        let mut ed = LineEditor::new();
+        let q = Queue::new();
+        ed.insert_str("abc");
+
+        let action = ed.handle_key(ctrl('h'), &q);
+
+        assert_eq!(action, InputAction::Nothing);
+        assert_eq!(ed.buffer, "ab");
+        assert_eq!(ed.cursor, "ab".len());
+    }
+
+    #[test]
+    fn alt_b_and_alt_f_move_by_words() {
+        let mut ed = LineEditor::new();
+        let q = Queue::new();
+        ed.insert_str("echo alpha beta");
+
+        let left = ed.handle_key(alt(KeyCode::Char('b')), &q);
+        assert_eq!(left, InputAction::Nothing);
+        assert_eq!(ed.cursor, "echo alpha ".len());
+
+        ed.handle_key(alt(KeyCode::Char('b')), &q);
+        assert_eq!(ed.cursor, "echo ".len());
+
+        let right = ed.handle_key(alt(KeyCode::Char('f')), &q);
+        assert_eq!(right, InputAction::Nothing);
+        assert_eq!(ed.cursor, "echo alpha".len());
+
+        ed.handle_key(alt(KeyCode::Char('f')), &q);
+        assert_eq!(ed.cursor, "echo alpha beta".len());
+    }
+
+    #[test]
+    fn alt_arrow_keys_move_by_words() {
+        let mut ed = LineEditor::new();
+        let q = Queue::new();
+        ed.insert_str("echo alpha beta");
+
+        let left = ed.handle_key(alt(KeyCode::Left), &q);
+        assert_eq!(left, InputAction::Nothing);
+        assert_eq!(ed.cursor, "echo alpha ".len());
+
+        let right = ed.handle_key(alt(KeyCode::Right), &q);
+        assert_eq!(right, InputAction::Nothing);
+        assert_eq!(ed.cursor, "echo alpha beta".len());
+    }
+
+    #[test]
+    fn ctrl_w_deletes_previous_word() {
+        let mut ed = LineEditor::new();
+        let q = Queue::new();
+        ed.insert_str("echo hello   ");
+
+        let action = ed.handle_key(ctrl('w'), &q);
+
+        assert_eq!(action, InputAction::Nothing);
+        assert_eq!(ed.buffer, "echo ");
+        assert_eq!(ed.cursor, "echo ".len());
+    }
+
+    #[test]
+    fn ctrl_w_deletes_word_before_cursor_without_touching_suffix() {
+        let mut ed = LineEditor::new();
+        let q = Queue::new();
+        ed.insert_str("echo hello world");
+        for _ in 0..6 {
+            ed.handle_key(key(KeyCode::Left), &q);
+        }
+
+        let action = ed.handle_key(ctrl('w'), &q);
+
+        assert_eq!(action, InputAction::Nothing);
+        assert_eq!(ed.buffer, "echo  world");
+        assert_eq!(ed.cursor, "echo ".len());
+    }
+
+    #[test]
+    fn ctrl_w_respects_utf8_boundaries() {
+        let mut ed = LineEditor::new();
+        let q = Queue::new();
+        ed.insert_str("echo cafe\u{301}");
+
+        let action = ed.handle_key(ctrl('w'), &q);
+
+        assert_eq!(action, InputAction::Nothing);
+        assert_eq!(ed.buffer, "echo ");
+        assert_eq!(ed.cursor, "echo ".len());
     }
 
     #[test]

@@ -12,7 +12,8 @@ command is running you can type the *next* command — review it, edit it,
 reorder, cancel, or chain it conditionally — and it dispatches automatically
 when the current one finishes.
 
-Works with any shell (zsh, bash, fish, sh).
+Works best with zsh, bash, and fish. Plain POSIX `sh` can run inside `cmdq`,
+but shells without prompt/preexec hooks have limited queue lifecycle detection.
 
 ## Why
 
@@ -71,12 +72,22 @@ cargo build --release
 cmdq        # spawns $SHELL inside cmdq
 ```
 
-The first run auto-installs OSC 133 prompt-marker hooks for your shell into
-a private rcfile. To make the integration permanent in your normal shell
-sessions too, run:
+The first run auto-loads OSC 133 prompt-marker hooks for zsh, bash, and fish
+inside the `cmdq` session. To make the integration permanent in your normal
+shell sessions too, run:
 
 ```bash
 cmdq --install-integration
+```
+
+## CLI options
+
+```bash
+cmdq --shell /bin/zsh              # run cmdq with a specific shell
+cmdq --install-integration         # install shell prompt markers into your rc file
+cmdq --print-integration zsh       # print the zsh, bash, or fish integration
+cmdq --help                        # show all flags
+cmdq --version                     # show the installed version
 ```
 
 ## Shell setup
@@ -109,15 +120,15 @@ Reload:
 source ~/.zshrc
 ```
 
-> macOS users: if you use a custom `ZDOTDIR`, install integration manually
-> with `--install-integration` rather than relying on the auto-injected shim.
+> macOS users: custom `ZDOTDIR` setups are supported. The auto-injected shim
+> sources your real zsh startup files, then appends cmdq's prompt markers.
 
 </details>
 
 <details>
 <summary><b>bash</b></summary>
 
-Install the integration into `~/.bashrc` (Linux) or `~/.bash_profile` (macOS):
+Install the integration into `~/.bashrc`:
 
 ```bash
 cmdq --install-integration
@@ -132,7 +143,7 @@ Auto-start in every terminal — append to your bash rc:
 Reload:
 
 ```bash
-source ~/.bashrc   # or ~/.bash_profile on macOS
+source ~/.bashrc
 ```
 
 </details>
@@ -165,19 +176,17 @@ source ~/.config/fish/config.fish
 <details>
 <summary><b>sh / dash / ash (POSIX)</b></summary>
 
-Install the integration into `~/.profile`:
+POSIX shells can run inside `cmdq`, but they do not expose reliable prompt
+and preexec hooks. Full queue automation requires zsh, bash, or fish.
 
-```sh
-cmdq --install-integration
-```
-
-Auto-start in every terminal — append to `~/.profile`:
+You can still auto-start `cmdq` from a POSIX shell if you want the wrapper
+available:
 
 ```sh
 [ -z "$CMDQ_ACTIVE" ] && exec cmdq
 ```
 
-Reload:
+Reload your profile:
 
 ```sh
 . ~/.profile
@@ -186,7 +195,7 @@ Reload:
 </details>
 
 <details>
-<summary><b>Manual integration (any shell)</b></summary>
+<summary><b>Manual integration (zsh, bash, fish)</b></summary>
 
 If you'd rather paste the integration snippet yourself (e.g. you manage your
 dotfiles via a tool that doesn't like generated edits), print it and copy
@@ -206,7 +215,7 @@ so quick commands (`ls`, `cd`) don't flash UI. Press **F1** or **?** any time
 the panel is visible for a full help overlay.
 
 > **Note:** while the queue panel is open, **↑** recalls items from the
-> *queue*, not your shell history. Exit with `Ctrl-\` (or double-tap `Esc`)
+> *queue*, not your shell history. Double-tap `Esc` to enter raw input mode
 > if you need shell history or want to scroll a pager (`git diff`, `less`).
 
 **Add to queue**
@@ -240,17 +249,23 @@ the panel is visible for a full help overlay.
 | Key | Action |
 |-----|--------|
 | Ctrl-Q | force the panel open even at the shell prompt |
-| Ctrl-\\ | raw input — keys go straight to the running app |
-| Esc Esc | raw input (SSH-safe alternative to Ctrl-\\); double-tap again to return |
+| Esc Esc | raw input — keys go straight to the running app; double-tap again to return |
+| Ctrl-\\ | send SIGQUIT to a running command; exits raw input when already raw |
 
 **Misc**
 
 | Key | Action |
 |-----|--------|
 | Ctrl-C | forward SIGINT to the running command (auto-pauses the queue) |
+| Ctrl-Z | suspend the running command |
 | Ctrl-D | quit cmdq (twice if the queue is non-empty) |
 | Ctrl-A / Ctrl-E | beginning / end of input line |
+| Ctrl-B / Ctrl-F | move one character left / right |
+| Alt-B / Alt-F | move one word left / right |
+| Alt-Left / Alt-Right | move one word left / right |
+| Ctrl-H | backspace |
 | Ctrl-U | kill back to start |
+| Ctrl-W | delete previous word |
 | F1 / ? | show / dismiss the help overlay |
 
 ## Smart behaviors
@@ -263,11 +278,15 @@ the panel is visible for a full help overlay.
   forwards keystrokes verbatim and hides the queue panel.
 - **SIGINT auto-pauses the queue.** Ctrl-C on a running command (or exit
   status 130) pauses the queue instead of dispatching the next item.
-- **Bracketed paste.** Pasting a multi-line snippet collapses newlines into
-  `;` so it lands as a single queue item.
+- **Bracketed paste.** Pasting a multi-line snippet keeps heredocs, loops,
+  and scripts intact while still landing as one queue item.
 - **Quit-confirm.** Ctrl-D with a non-empty queue requires a second press.
-- **Persistence.** The queue lives in `~/.local/share/cmdq/queue.json`, so a
-  restart mid-session doesn't lose pending work.
+- **Persistence.** The queue lives in `$XDG_DATA_HOME/cmdq/queue.json` when
+  `$XDG_DATA_HOME` is set to an absolute path, otherwise your platform data
+  directory, so a restart mid-session doesn't lose pending work. If a restored
+  queue was saved from another working directory, `cmdq` keeps it paused and
+  asks for an extra Ctrl-X before running it in the current shell. Corrupt
+  queue files are backed up as `queue.json.corrupt-*` instead of overwritten.
 
 ## How it works
 
@@ -290,12 +309,14 @@ cargo fmt --all
 
 ## Caveats
 
-- `vt100` rendering is solid for normal CLI output, colors, and most TUIs,
-  but may have small fidelity gaps for exotic sequences (sixel, kitty
-  graphics). Use `Ctrl-\` to passthrough to the running program.
-- The auto-injected ZDOTDIR shim sources your real `~/.zshrc` before
-  appending the integration. If you have machinery that's strictly
-  ZDOTDIR-aware, install integration manually via `--install-integration`.
+- `cmdq` forwards shell output directly to your terminal instead of emulating
+  a terminal. Colors, hyperlinks, scrollback, selection, OSC 52, and image
+  protocols stay owned by the terminal.
+- The auto-injected ZDOTDIR shim sources your real zsh startup files before
+  appending the integration. If your zsh startup mutates global terminal state,
+  test a fresh `cmdq --shell /bin/zsh` session before auto-starting it.
+- POSIX `sh` support is best-effort because portable shells do not expose a
+  reliable preexec hook. Use zsh, bash, or fish for full queue automation.
 
 ## License
 

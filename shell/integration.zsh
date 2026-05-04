@@ -5,13 +5,23 @@
 # Safe to source multiple times. No-op if not running under cmdq.
 
 if [[ -n "$CMDQ_ACTIVE" ]] && [[ -z "$CMDQ_INTEGRATION_LOADED" ]]; then
-    export CMDQ_INTEGRATION_LOADED=1
+    CMDQ_INTEGRATION_LOADED=1
+
+    _cmdq_emit_cwd() {
+        local cwd=$PWD
+        cwd=${cwd//\%/%25}
+        cwd=${cwd//$'\a'/%07}
+        cwd=${cwd//$'\033'/%1B}
+        cwd=${cwd//$'\r'/%0D}
+        cwd=${cwd//$'\n'/%0A}
+        printf '\e]7;file://localhost%s\a' "$cwd"
+    }
 
     _cmdq_precmd() {
         local exit=$?
-        # Emit "command finished" *before* "prompt start" so cmdq sees them in
-        # the right order. The very first prompt (no previous command) emits
-        # only the prompt-start marker.
+        # Emit the new cwd before "command finished" so cmdq can make dispatch
+        # decisions against the directory the next command would actually run in.
+        _cmdq_emit_cwd
         if [[ -n "$_CMDQ_IN_CMD" ]]; then
             printf '\e]133;D;%s\a' "$exit"
             unset _CMDQ_IN_CMD

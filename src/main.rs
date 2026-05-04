@@ -33,7 +33,11 @@ fn main() -> Result<()> {
     }
 
     if cli.install_integration {
-        let report = shell_integration::install_for_current_shell()?;
+        let report = if let Some(shell) = cli.shell.as_deref() {
+            shell_integration::install_for_shell(shell)?
+        } else {
+            shell_integration::install_for_current_shell()?
+        };
         println!("{report}");
         return Ok(());
     }

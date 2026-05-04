@@ -5,6 +5,7 @@
 //!   ESC ] 133 ; B ST   -- prompt end / command input start
 //!   ESC ] 133 ; C ST   -- pre-execution (user pressed Enter)
 //!   ESC ] 133 ; D\[;ec\] ST -- command finished, optional exit code
+//!   ESC ] 7 ; file://host/path ST -- current shell working directory
 //!
 //! ST may be either BEL (0x07) or ESC \ (0x1B 0x5C).
 //!
@@ -17,7 +18,7 @@
 
 const ESC: u8 = 0x1B;
 const BEL: u8 = 0x07;
-const OSC_BODY_LIMIT: usize = 256;
+const OSC_BODY_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -25,6 +26,14 @@ pub enum Event {
     PromptEnd,
     CommandStart,
     CommandEnd { exit_code: Option<i32> },
+    CurrentDir(std::path::PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedEvent {
+    pub event: Event,
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +48,7 @@ enum State {
 pub struct Detector {
     state: State,
     body: Vec<u8>,
+    sequence_start: Option<usize>,
 }
 
 impl Default for Detector {
@@ -52,30 +62,47 @@ impl Detector {
         Self {
             state: State::Normal,
             body: Vec::new(),
+            sequence_start: None,
         }
     }
 
     /// Feed a chunk of bytes. Returns events detected within them.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
+        self.feed_with_offsets(bytes)
+            .into_iter()
+            .map(|ev| ev.event)
+            .collect()
+    }
+
+    pub fn feed_with_offsets(&mut self, bytes: &[u8]) -> Vec<LocatedEvent> {
         let mut out = Vec::new();
-        for &b in bytes {
-            self.step(b, &mut out);
+        if !matches!(self.state, State::Normal) {
+            self.sequence_start = None;
+        }
+        for (idx, &b) in bytes.iter().enumerate() {
+            self.step(idx, b, &mut out);
         }
         out
     }
 
-    fn finish_osc(&mut self, out: &mut Vec<Event>) {
-        if let Some(ev) = parse_133(&self.body) {
-            out.push(ev);
+    fn finish_osc(&mut self, idx: usize, out: &mut Vec<LocatedEvent>) {
+        if let Some(ev) = parse_osc(&self.body) {
+            out.push(LocatedEvent {
+                event: ev,
+                start: self.sequence_start.unwrap_or(0),
+                end: idx + 1,
+            });
         }
         self.body.clear();
+        self.sequence_start = None;
         self.state = State::Normal;
     }
 
-    fn step(&mut self, b: u8, out: &mut Vec<Event>) {
+    fn step(&mut self, idx: usize, b: u8, out: &mut Vec<LocatedEvent>) {
         self.state = match self.state {
             State::Normal => {
                 if b == ESC {
+                    self.sequence_start = Some(idx);
                     State::AfterEsc
                 } else {
                     State::Normal
@@ -86,12 +113,18 @@ impl Detector {
                     self.body.clear();
                     State::InOsc
                 }
-                ESC => State::AfterEsc,
-                _ => State::Normal,
+                ESC => {
+                    self.sequence_start = Some(idx);
+                    State::AfterEsc
+                }
+                _ => {
+                    self.sequence_start = None;
+                    State::Normal
+                }
             },
             State::InOsc => {
                 if b == BEL {
-                    self.finish_osc(out);
+                    self.finish_osc(idx, out);
                     return;
                 }
                 if b == ESC {
@@ -105,17 +138,22 @@ impl Detector {
             }
             State::InOscAfterEsc => match b {
                 b'\\' => {
-                    self.finish_osc(out);
+                    self.finish_osc(idx, out);
                     return;
                 }
                 ESC => State::InOscAfterEsc,
                 _ => {
                     self.body.clear();
+                    self.sequence_start = None;
                     State::Normal
                 }
             },
         };
     }
+}
+
+fn parse_osc(body: &[u8]) -> Option<Event> {
+    parse_133(body).or_else(|| parse_osc7_cwd(body))
 }
 
 fn parse_133(body: &[u8]) -> Option<Event> {
@@ -129,6 +167,46 @@ fn parse_133(body: &[u8]) -> Option<Event> {
             let exit_code = parts.next().and_then(|s| s.parse::<i32>().ok());
             Some(Event::CommandEnd { exit_code })
         }
+        _ => None,
+    }
+}
+
+fn parse_osc7_cwd(body: &[u8]) -> Option<Event> {
+    let uri = std::str::from_utf8(body).ok()?.strip_prefix("7;file://")?;
+    let path_start = uri.find('/')?;
+    let path = percent_decode_uri_path(&uri[path_start..]);
+    Some(Event::CurrentDir(std::path::PathBuf::from(path)))
+}
+
+fn percent_decode_uri_path(path: &str) -> String {
+    let mut out = Vec::with_capacity(path.len());
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2))
+                && let (Some(hi), Some(lo)) = (hex_value(hi), hex_value(lo))
+            {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
 }
@@ -192,6 +270,22 @@ mod tests {
         assert!(events(b"\x1b]0;window title\x07").is_empty());
         assert!(events(b"\x1b]2;another title\x07").is_empty());
         assert!(events(b"\x1b]52;c;abcd\x07").is_empty());
+    }
+
+    #[test]
+    fn detects_current_dir_osc7() {
+        assert_eq!(
+            events(b"\x1b]7;file://host/tmp/a%20b\x07"),
+            vec![Event::CurrentDir(std::path::PathBuf::from("/tmp/a b"))]
+        );
+    }
+
+    #[test]
+    fn osc7_current_dir_tolerates_literal_percent() {
+        assert_eq!(
+            events(b"\x1b]7;file://host/tmp/100%done\x07"),
+            vec![Event::CurrentDir(std::path::PathBuf::from("/tmp/100%done"))]
+        );
     }
 
     #[test]
