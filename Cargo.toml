@@ -35,7 +35,7 @@ dirs = "6"
 unicode-width = "0.2"
 log = "0.4"
 env_logger = "0.11"
-signal-hook = "0.3"
+signal-hook = "0.4"
 fs2 = "0.4"
 
 [dev-dependencies]
