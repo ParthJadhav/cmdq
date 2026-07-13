@@ -66,19 +66,112 @@ pub fn panel_height(view: &PanelState<'_>, total_rows: u16) -> u16 {
     1 + n + 1 + 1
 }
 
+/// Number of physical rows occupied by the currently painted panel after a
+/// terminal width change. Terminals reflow screen cells before delivering the
+/// resize event, so the old logical panel rows may span several new rows.
+pub fn reflowed_panel_height(
+    view: &PanelState<'_>,
+    panel_height: u16,
+    old_cols: u16,
+    new_cols: u16,
+) -> u16 {
+    let new_cols = new_cols.max(1) as usize;
+    if view.show_help {
+        // Help owns nearly the whole viewport and its title fills the row.
+        // Conservatively clear its resized footprint; at most the two shell
+        // context rows above it are affected on an extreme shrink.
+        let wraps = (old_cols.max(1) as usize).div_ceil(new_cols);
+        return (panel_height as usize)
+            .saturating_mul(wraps)
+            .min(u16::MAX as usize) as u16;
+    }
+
+    let mut widths = Vec::with_capacity(panel_height as usize);
+    widths.push(old_cols.max(1) as usize); // divider-filled header
+
+    let list_capacity = panel_height.saturating_sub(3) as usize;
+    let queue_start = queue_window_start(view, list_capacity);
+    for (i, item) in view
+        .queue
+        .items()
+        .iter()
+        .enumerate()
+        .skip(queue_start)
+        .take(list_capacity)
+        .take(view.max_queue_visible as usize)
+    {
+        let prefix = if view.editing_index == Some(i) {
+            " ✎ "
+        } else if i == 0 {
+            " ▸ "
+        } else {
+            "   "
+        };
+        let cond = if item.conditional { "↪ " } else { "  " };
+        let text = format!("{prefix}{cond}{}", display_control_chars(&item.command));
+        widths.push(display_width(&clip_to_width(&text, old_cols as usize)));
+    }
+    while widths.len() < 1 + list_capacity {
+        widths.push(0);
+    }
+
+    let prompt = input_prompt_prefix(view);
+    let remaining = (old_cols as usize).saturating_sub(display_width(prompt));
+    let (display_input, display_cursor) =
+        display_control_chars_with_cursor(view.input_buffer, view.input_cursor);
+    let (visible_input, _) = input_window(&display_input, display_cursor, remaining);
+    widths.push(display_width(prompt) + display_width(&visible_input));
+
+    let mut hints = Vec::new();
+    if paint_hints(&mut hints, view, old_cols).is_ok() {
+        widths.push(ansi_display_width(&hints));
+    } else {
+        widths.push(old_cols as usize);
+    }
+
+    widths
+        .into_iter()
+        .map(|width| width.max(1).div_ceil(new_cols))
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16
+}
+
 /// Reserve the bottom `panel_height` rows. Sets the scrolling region above
-/// the panel and clears the panel rows. After return, the cursor is left in
-/// the top-left of the scrolling region (where the shell expects to write).
+/// the panel, preserves occupied rows that would otherwise be overwritten,
+/// clears the panel rows, and restores the adjusted shell cursor within the
+/// scrolling region.
 pub fn reserve(
     out: &mut impl Write,
     panel_height: u16,
     total_rows: u16,
     total_cols: u16,
+    shell_cursor: (u16, u16),
 ) -> io::Result<()> {
     if panel_height == 0 || panel_height >= total_rows {
         return reset_scroll_region(out, total_rows);
     }
     let scroll_bottom = total_rows - panel_height;
+    let (shell_cursor_col, shell_cursor_row) = shell_cursor;
+
+    // The panel is opened lazily, so the shell may already have printed into
+    // the rows we are about to claim. This is especially common after the
+    // first command: the next prompt and command line both sit at the bottom
+    // of the terminal. Clearing those rows would silently erase terminal
+    // history. Scroll just the occupied portion of the claimed area into
+    // scrollback before installing the smaller scrolling region.
+    let occupied_claimed_rows = shell_cursor_row
+        .min(total_rows.saturating_sub(1))
+        .saturating_add(1)
+        .saturating_sub(scroll_bottom);
+    if occupied_claimed_rows > 0 {
+        out.queue(MoveTo(0, total_rows.saturating_sub(1)))?;
+        for _ in 0..occupied_claimed_rows {
+            out.write_all(b"\n")?;
+        }
+    }
+
+    let adjusted_cursor_row = shell_cursor_row.saturating_sub(occupied_claimed_rows);
+
     // DECSTBM: confine scrolling to rows 1..=scroll_bottom (1-indexed).
     // NOTE: this also resets the cursor to home (1,1) on xterm-class
     // terminals; the explicit MoveTo below pins it back inside the region.
@@ -86,10 +179,14 @@ pub fn reserve(
     out.queue(MoveTo(0, scroll_bottom.saturating_sub(1)))?;
     // Clear each panel row so we start from a known blank slate.
     clear_panel_rows(out, panel_height, total_rows, total_cols)?;
-    // clear_panel_rows leaves the cursor in the panel area; bring it back
-    // inside the scroll region so any subsequent shell bytes / SIGWINCH
-    // redraw land where the shell expects.
-    out.queue(MoveTo(0, scroll_bottom.saturating_sub(1)))?;
+    // clear_panel_rows leaves the cursor in the panel area; restore the
+    // shell's logical cursor, adjusted for any rows scrolled above. Keeping
+    // its original row avoids a large blank jump when the panel first opens
+    // after `clear` or while output is still near the top of the screen.
+    out.queue(MoveTo(
+        shell_cursor_col.min(total_cols.saturating_sub(1)),
+        adjusted_cursor_row.min(scroll_bottom.saturating_sub(1)),
+    ))?;
     out.flush()
 }
 
@@ -330,6 +427,10 @@ fn paint_hints(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> 
             "[^D again to quit]"
         } else if view.editing_index.is_some() {
             "[Esc cancel] [Enter save] [^D delete] [Alt-Up/Down reorder]"
+        } else if view.child_input_prompt {
+            "[keys -> child] [Enter submit] [^C interrupt] [F1 help]"
+        } else if view.passthrough_to_child {
+            "[keys -> child] [Esc Esc / ^\\ exit raw]"
         } else if view.running {
             "[Enter add] [Up edit] [Tab chain] [^X pause] [^\\ SIGQUIT] [? help]"
         } else {
@@ -360,6 +461,26 @@ fn paint_hints(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> 
         chip(out, "Alt-↑↓", "reorder")?;
         gap(out)?;
         chip(out, "⇥", "chain")?;
+        return Ok(());
+    }
+
+    if view.child_input_prompt {
+        chip(out, "keys", "to child")?;
+        gap(out)?;
+        chip(out, "⏎", "submit")?;
+        gap(out)?;
+        chip(out, "^C", "interrupt")?;
+        sep(out)?;
+        chip(out, "F1", "help")?;
+        return Ok(());
+    }
+
+    if view.passthrough_to_child {
+        chip(out, "keys", "to child")?;
+        sep(out)?;
+        chip(out, "Esc Esc", "exit raw")?;
+        gap(out)?;
+        chip(out, "^\\", "exit raw")?;
         return Ok(());
     }
 
@@ -450,15 +571,14 @@ fn paint_help(
     out.queue(Print("─".repeat(pad)))?;
     out.queue(ResetColor)?;
 
-    // Help is laid out to fit in HELP_MAX_ROWS = 28 lines including the
-    // title row at the top. Section headers + entries below; spacer rows
-    // are minimal so nothing falls off the bottom.
-    let lines: &[(&str, &str)] = &[
+    // The full layout fits in HELP_MAX_ROWS = 28 lines including the title.
+    // A compact layout keeps every essential shortcut visible in a standard
+    // 24-row terminal (21 content rows after leaving shell context + title).
+    let full_lines: &[(&str, &str)] = &[
         (
             "",
             "panel appears 1.5s into a long command. ↑ recalls the QUEUE.",
         ),
-        ("", ""),
         ("add to queue", ""),
         ("Enter", "add the typed command to the queue"),
         ("Tab", "chain — only run if previous succeeded"),
@@ -487,8 +607,68 @@ fn paint_help(
         ("F1 / ?", "show this help · Esc / Enter dismisses"),
     ];
 
+    let compact_lines: &[(&str, &str)] = &[
+        ("add to queue", ""),
+        ("Enter", "add the typed command to the queue"),
+        ("Tab", "chain — only run if previous succeeded"),
+        ("Esc", "clear the input buffer"),
+        ("edit a queued item", ""),
+        ("↑ / ↓", "open previous / next queued item for edit"),
+        ("Enter", "save the edit"),
+        ("Esc", "cancel the edit (item unchanged)"),
+        ("Ctrl-D", "delete the item being edited"),
+        ("Alt-↑ / Alt-↓", "reorder the item being edited"),
+        ("queue control", ""),
+        ("Ctrl-X", "pause / resume auto-dispatch"),
+        ("Ctrl-K", "clear the entire queue"),
+        ("modes", ""),
+        ("Ctrl-Q", "force the panel open at the shell prompt"),
+        ("Esc Esc", "raw input — keys go to the running app"),
+        ("Ctrl-\\", "SIGQUIT running command · exits raw input"),
+        ("misc", ""),
+        ("Ctrl-C", "SIGINT the running command (pauses queue)"),
+        ("Ctrl-D", "quit cmdq (twice if queue is non-empty)"),
+        ("F1 / ?", "show this help · Esc / Enter dismisses"),
+    ];
+
+    let small_lines: &[(&str, &str)] = &[
+        ("add to queue", ""),
+        ("Enter / Tab / Esc", "add / chain / clear input"),
+        ("edit queued item", ""),
+        ("↑ / ↓", "select previous / next queued item"),
+        ("Enter / Esc", "save / cancel edit"),
+        ("Ctrl-D", "delete edited item"),
+        ("Alt-↑ / Alt-↓", "reorder edited item"),
+        ("queue control", ""),
+        ("Ctrl-X / Ctrl-K", "pause or resume / clear queue"),
+        ("modes", ""),
+        ("Ctrl-Q", "force panel open at shell prompt"),
+        ("Esc Esc / Ctrl-\\", "raw input / SIGQUIT or exit raw"),
+        ("misc", ""),
+        (
+            "Ctrl-C / Ctrl-D",
+            "SIGINT + pause / quit (confirm if queued)",
+        ),
+        ("F1 / ?", "show help · Esc / Enter dismisses"),
+    ];
+
     let avail = panel_height.saturating_sub(1) as usize;
-    for (i, (k, d)) in lines.iter().take(avail).enumerate() {
+    let lines = if avail >= full_lines.len() {
+        full_lines
+    } else if avail >= compact_lines.len() {
+        compact_lines
+    } else {
+        small_lines
+    };
+    let visible = avail.min(lines.len());
+    for i in 0..visible {
+        // On very short terminals, always keep the dismissal hint visible
+        // instead of trapping the user in a help view with no visible exit.
+        let (k, d) = if lines.len() > avail && i + 1 == visible {
+            lines[lines.len() - 1]
+        } else {
+            lines[i]
+        };
         let row = top + 1 + i as u16;
         out.queue(MoveTo(0, row))?;
         out.queue(Clear(ClearType::CurrentLine))?;
@@ -522,9 +702,13 @@ fn paint_help(
         out.queue(Print(clip_to_width(&format!("  {:<18}", k), key_width)))?;
         out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
         out.queue(SetForegroundColor(Color::Grey))?;
+        let description_gap = usize::from((total_cols as usize) > key_width);
+        if description_gap > 0 {
+            out.queue(Print(" "))?;
+        }
         out.queue(Print(clip_to_width(
             d,
-            (total_cols as usize).saturating_sub(key_width),
+            (total_cols as usize).saturating_sub(key_width + description_gap),
         )))?;
         out.queue(ResetColor)?;
     }
@@ -533,6 +717,27 @@ fn paint_help(
 
 fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
+}
+
+fn ansi_display_width(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    let mut printable = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            printable.push(ch);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    display_width(&printable)
 }
 
 fn char_width(c: char) -> usize {

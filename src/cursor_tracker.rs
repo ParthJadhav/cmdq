@@ -56,8 +56,12 @@ impl CursorTracker {
     }
 
     pub fn set_to_bottom_left(&mut self) {
-        self.col = 0;
-        self.row = self.rows.saturating_sub(1);
+        self.set_position(0, self.rows.saturating_sub(1));
+    }
+
+    pub fn set_position(&mut self, col: u16, row: u16) {
+        self.col = col.min(self.cols.saturating_sub(1));
+        self.row = row.min(self.rows.saturating_sub(1));
         self.state = State::Ground;
         self.csi.clear();
         self.clear_utf8();
@@ -135,10 +139,11 @@ impl CursorTracker {
                 0x1b => self.state = State::OscEsc,
                 _ => self.state = State::Osc,
             },
-            State::String => match b {
-                0x1b => self.state = State::StringEsc,
-                _ => {}
-            },
+            State::String => {
+                if b == 0x1b {
+                    self.state = State::StringEsc;
+                }
+            }
             State::StringEsc => match b {
                 b'\\' => self.state = State::Ground,
                 0x1b => self.state = State::StringEsc,

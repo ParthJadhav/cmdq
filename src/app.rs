@@ -32,7 +32,7 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 #[cfg(unix)]
 use signal_hook::{
@@ -670,6 +670,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
     let mut last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
     let mut last_queue_sync = Instant::now();
     let mut last_session_lease_refresh = Instant::now();
+    let mut deferred_panel_reflow_rows: Option<u16> = None;
 
     let result = loop {
         // 1. Drain any PTY output, pass it straight through to the user's
@@ -900,6 +901,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         }
 
         state.tick_status();
+        flush_pending_escape_if_due(&mut state, &mut writer);
 
         if let Ok(Some(_)) = pty.try_wait() {
             if !mode_pending.is_empty() {
@@ -923,6 +925,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                 term_cols,
                 &mut pty,
                 &cleanup_state,
+                shell_cursor.position(),
             );
             sync_cursor_tracker_for_layout(&mut shell_cursor, layout, term_cols, term_rows);
             break Ok(());
@@ -939,6 +942,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                 term_cols,
                 &mut pty,
                 &cleanup_state,
+                shell_cursor.position(),
             )?;
             sync_cursor_tracker_for_layout(&mut shell_cursor, layout, term_cols, term_rows);
             last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
@@ -959,25 +963,75 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                     let old_reserved = matches!(layout, PanelLayout::Reserved { .. });
                     let new_cols = cw.max(1);
                     let new_rows = rh.max(1);
+                    let shrinking = new_cols < old_cols || new_rows < old_rows;
+                    let reflowed_panel_rows = if let PanelLayout::Reserved { height } = layout {
+                        let view = PanelState {
+                            queue: &state.queue,
+                            running: matches!(state.shell_state, ShellState::Running),
+                            force_queue: state.force_queue,
+                            passthrough_to_child: state.effective_passthrough()
+                                || state.child_input_prompt_active(),
+                            child_input_prompt: state.child_input_prompt_active(),
+                            input_buffer: &state.editor.buffer,
+                            input_cursor: state.editor.cursor,
+                            editing_index: state.editor.editing_index,
+                            status: &state.status,
+                            pending_quit: state.pending_quit_active(),
+                            show_help: state.show_help,
+                            max_queue_visible: MAX_QUEUE_VISIBLE,
+                        };
+                        panel::reflowed_panel_height(&view, height, old_cols, new_cols)
+                    } else {
+                        0
+                    };
                     // The desired panel height may change with the new size;
-                    // release first, then recompute and apply. This keeps the
-                    // outer terminal's scroll region sane even if the resized
-                    // state no longer wants a panel.
-                    transition_layout_recorded(
-                        &mut stdout,
-                        &mut layout,
-                        PanelLayout::Hidden,
-                        old_rows,
-                        old_cols,
-                        &mut pty,
-                        &cleanup_state,
-                    )?;
+                    // release first, then recompute and apply. On shrink, the
+                    // terminal has already reflowed panel cells before this
+                    // event arrives, so clear their measured new footprint
+                    // rather than using stale old-size coordinates.
+                    if old_reserved && shrinking {
+                        layout = PanelLayout::Hidden;
+                    } else {
+                        transition_layout_recorded(
+                            &mut stdout,
+                            &mut layout,
+                            PanelLayout::Hidden,
+                            old_rows,
+                            old_cols,
+                            &mut pty,
+                            &cleanup_state,
+                            shell_cursor.position(),
+                        )?;
+                    }
                     term_cols = new_cols;
                     term_rows = new_rows;
                     record_terminal_restore_state(&cleanup_state, layout, term_rows, term_cols);
                     if old_reserved {
                         panel::release(&mut stdout, 0, term_rows, term_cols)?;
+                        if shrinking {
+                            let (col, row) = clear_reflowed_panel_after_shrink(
+                                &mut stdout,
+                                reflowed_panel_rows,
+                                term_cols,
+                                term_rows,
+                                shell_cursor.position(),
+                            )?;
+                            shell_cursor.set_size(term_cols, term_rows);
+                            shell_cursor.set_position(col, row);
+                            deferred_panel_reflow_rows =
+                                Some(reflowed_panel_rows.saturating_sub(term_rows))
+                                    .filter(|rows| *rows > 0);
+                        }
                         record_terminal_restore_state(&cleanup_state, layout, term_rows, term_cols);
+                    }
+                    if new_rows > old_rows
+                        && let Some(reflow_rows) = deferred_panel_reflow_rows.take()
+                    {
+                        panel::release(&mut stdout, 0, term_rows, term_cols)?;
+                        clear_reappeared_panel_rows(&mut stdout, reflow_rows, old_rows, term_rows)?;
+                        let (col, row) = shell_cursor.position();
+                        shell_cursor.set_size(term_cols, term_rows);
+                        shell_cursor.set_position(col, row.saturating_add(new_rows - old_rows));
                     }
                     state.terminal_allows_panel = terminal_allows_panel(term_cols, term_rows);
                     let desired = desired_layout(&state, term_rows);
@@ -989,6 +1043,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                         term_cols,
                         &mut pty,
                         &cleanup_state,
+                        shell_cursor.position(),
                     )?;
                     resize_pty_for_layout(&mut pty, layout, term_cols, term_rows);
                     sync_cursor_tracker_for_layout(&mut shell_cursor, layout, term_cols, term_rows);
@@ -1008,6 +1063,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                                 term_cols,
                                 &mut pty,
                                 &cleanup_state,
+                                shell_cursor.position(),
                             )?;
                             sync_cursor_tracker_for_layout(
                                 &mut shell_cursor,
@@ -1494,6 +1550,7 @@ fn record_alt_screen_state(state: &Arc<Mutex<TerminalRestoreState>>, alt_screen:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transition_layout_recorded(
     out: &mut io::Stdout,
     current: &mut PanelLayout,
@@ -1502,8 +1559,17 @@ fn transition_layout_recorded(
     term_cols: u16,
     pty: &mut ShellPty,
     cleanup_state: &Arc<Mutex<TerminalRestoreState>>,
+    shell_cursor: (u16, u16),
 ) -> Result<()> {
-    transition_layout(out, current, desired, term_rows, term_cols, pty)?;
+    transition_layout(
+        out,
+        current,
+        desired,
+        term_rows,
+        term_cols,
+        pty,
+        shell_cursor,
+    )?;
     record_terminal_restore_state(cleanup_state, *current, term_rows, term_cols);
     Ok(())
 }
@@ -1517,6 +1583,7 @@ fn transition_layout(
     term_rows: u16,
     term_cols: u16,
     pty: &mut ShellPty,
+    shell_cursor: (u16, u16),
 ) -> Result<()> {
     if *current == desired {
         return Ok(());
@@ -1525,10 +1592,21 @@ fn transition_layout(
     // state — keeps the state machine simple even on resize.
     if let PanelLayout::Reserved { height } = *current {
         panel::release(out, height, term_rows, term_cols)?;
+        // Resetting DECSTBM moves the real terminal cursor. Put it back on
+        // the shell cursor that we tracked from PTY output before resizing
+        // the child; otherwise a SIGWINCH prompt redraw can leave an orphan
+        // prompt at the old row and a second prompt at the screen bottom.
+        out.queue(MoveTo(
+            shell_cursor.0.min(term_cols.saturating_sub(1)),
+            shell_cursor.1.min(term_rows.saturating_sub(1)),
+        ))?;
+        out.flush()?;
     }
     match desired {
         PanelLayout::Hidden => {}
-        PanelLayout::Reserved { height } => panel::reserve(out, height, term_rows, term_cols)?,
+        PanelLayout::Reserved { height } => {
+            panel::reserve(out, height, term_rows, term_cols, shell_cursor)?
+        }
     }
     resize_pty_for_layout(pty, desired, term_cols, term_rows);
     *current = desired;
@@ -1549,12 +1627,20 @@ fn sync_cursor_tracker_for_layout(
     term_cols: u16,
     term_rows: u16,
 ) {
+    let (col, row) = cursor.position();
     let shell_rows = match layout {
         PanelLayout::Hidden => term_rows,
         PanelLayout::Reserved { height } => term_rows.saturating_sub(height).max(1),
     };
     cursor.set_size(term_cols, shell_rows);
-    cursor.set_to_bottom_left();
+    match layout {
+        PanelLayout::Hidden => cursor.set_position(col, row),
+        PanelLayout::Reserved { height } => {
+            let scroll_bottom = term_rows.saturating_sub(height);
+            let scrolled_rows = row.saturating_add(1).saturating_sub(scroll_bottom);
+            cursor.set_position(col, row.saturating_sub(scrolled_rows));
+        }
+    }
 }
 
 fn restore_shell_cursor_if_reserved(
@@ -1566,6 +1652,52 @@ fn restore_shell_cursor_if_reserved(
         let (col, row) = cursor.position();
         out.queue(MoveTo(col, row))?;
     }
+    Ok(())
+}
+
+fn clear_reflowed_panel_after_shrink(
+    out: &mut io::Stdout,
+    panel_rows: u16,
+    term_cols: u16,
+    term_rows: u16,
+    shell_cursor: (u16, u16),
+) -> Result<(u16, u16)> {
+    // Terminals reflow already-painted panel rows before delivering Resize,
+    // so clear the measured new footprint at the bottom instead of using the
+    // stale old coordinates (or erasing unrelated shell rows).
+    let rows_to_clear = panel_rows.min(term_rows);
+    let first_panel_row = term_rows.saturating_sub(rows_to_clear);
+    for row in first_panel_row..term_rows {
+        out.queue(MoveTo(0, row))?;
+        out.queue(Clear(ClearType::CurrentLine))?;
+    }
+    let safe_row = if first_panel_row == 0 {
+        0
+    } else {
+        shell_cursor.1.min(first_panel_row - 1)
+    };
+    let safe_col = shell_cursor.0.min(term_cols.saturating_sub(1));
+    out.queue(MoveTo(safe_col, safe_row))?;
+    out.flush()?;
+    Ok((safe_col, safe_row))
+}
+
+fn clear_reappeared_panel_rows(
+    out: &mut io::Stdout,
+    panel_rows: u16,
+    old_rows: u16,
+    new_rows: u16,
+) -> Result<()> {
+    // When a tiny viewport grows, tmux pulls the old viewport down and fills
+    // the newly exposed band from scrollback. Reflowed panel overflow sits
+    // immediately above the preserved old viewport, so erase only that band.
+    let old_viewport_top = new_rows.saturating_sub(old_rows);
+    let first_panel_row = old_viewport_top.saturating_sub(panel_rows);
+    for row in first_panel_row..old_viewport_top {
+        out.queue(MoveTo(0, row))?;
+        out.queue(Clear(ClearType::CurrentLine))?;
+    }
+    out.flush()?;
     Ok(())
 }
 
@@ -1626,6 +1758,7 @@ fn handle_osc_event(
                     term_cols,
                     pty,
                     cleanup_state,
+                    shell_cursor.position(),
                 )?;
                 sync_cursor_tracker_for_layout(shell_cursor, *layout, term_cols, term_rows);
                 *last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
@@ -1722,6 +1855,7 @@ fn refresh_auto_passthrough_for_child_modes(
             term_cols,
             pty,
             cleanup_state,
+            shell_cursor.position(),
         )?;
         sync_cursor_tracker_for_layout(shell_cursor, *layout, term_cols, term_rows);
         *last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
@@ -2000,6 +2134,7 @@ fn handle_key(
         && (state.panel_should_be_visible() || state.manual_passthrough)
     {
         let now = Instant::now();
+        let child_owns_input = !state.editor_owns_input();
         let double_tap = state
             .last_esc_at
             .map(|t| now.duration_since(t) <= ESC_DOUBLE_TAP_WINDOW)
@@ -2010,8 +2145,17 @@ fn handle_key(
             return KeyOutcome::Continue;
         }
         state.last_esc_at = Some(now);
+        if child_owns_input {
+            // Hold a child-bound Escape briefly so Esc Esc can toggle raw
+            // mode without leaking the first byte into the running app.
+            return KeyOutcome::Continue;
+        }
         // fall through so the first Esc behaves normally
     } else if state.last_esc_at.is_some() {
+        if !state.editor_owns_input() {
+            let _ = writer.write_all(b"\x1b");
+            let _ = writer.flush();
+        }
         state.last_esc_at = None;
     }
 
@@ -2269,6 +2413,21 @@ fn handle_key(
         }
     }
     KeyOutcome::Continue
+}
+
+fn flush_pending_escape_if_due(state: &mut AppState, writer: &mut Box<dyn Write + Send>) {
+    let expired = state
+        .last_esc_at
+        .map(|started| started.elapsed() > ESC_DOUBLE_TAP_WINDOW)
+        .unwrap_or(false);
+    if !expired {
+        return;
+    }
+    if !state.editor_owns_input() {
+        let _ = writer.write_all(b"\x1b");
+        let _ = writer.flush();
+    }
+    state.last_esc_at = None;
 }
 
 fn toggle_queue_pause(state: &mut AppState, writer: &mut Box<dyn Write + Send>) {
@@ -2805,8 +2964,7 @@ fn is_likely_complete_shell_command(line: &str) -> bool {
 
     let last_word = trimmed
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
-        .filter(|s| !s.is_empty())
-        .next_back()
+        .rfind(|s| !s.is_empty())
         .unwrap_or("");
     !matches!(last_word, "do" | "then" | "else" | "elif" | "case")
 }
