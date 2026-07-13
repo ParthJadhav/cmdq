@@ -1293,7 +1293,10 @@ fn binary_prompt_newline_paste_fast_followup_queues_next_command() {
     std::fs::write(&int_path, include_str!("../shell/integration.bash")).unwrap();
     std::fs::write(
         home.join(".bashrc"),
-        format!("PS1='$ '\nsource \"{}\"\n", int_path.display()),
+        format!(
+            "PS1='$ '\nbind 'set enable-bracketed-paste off'\nsource \"{}\"\n",
+            int_path.display()
+        ),
     )
     .unwrap();
 
@@ -1406,7 +1409,10 @@ fn binary_leading_noop_paste_fast_followup_queues_next_command() {
     std::fs::write(&int_path, include_str!("../shell/integration.bash")).unwrap();
     std::fs::write(
         home.join(".bashrc"),
-        format!("PS1='$ '\nsource \"{}\"\n", int_path.display()),
+        format!(
+            "PS1='$ '\nbind 'set enable-bracketed-paste off'\nsource \"{}\"\n",
+            int_path.display()
+        ),
     )
     .unwrap();
 

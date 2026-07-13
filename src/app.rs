@@ -531,6 +531,11 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         return Ok(());
     }
 
+    // Register handlers before creating any persistent session state. A
+    // SIGTERM can arrive as soon as another process observes the lease; the
+    // signal iterator queues it until the cleanup thread is ready.
+    let pending_signals = prepare_signal_cleanup().context("prepare signal cleanup")?;
+
     let session_cwd = std::env::current_dir().ok();
     let queue_path = queue::try_default_path()?;
     let (mut queue, queue_load_warning) = Queue::load_or_default_with_warning(&queue_path);
@@ -590,6 +595,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
     });
     let session_lease_io = Arc::new(Mutex::new(()));
     install_signal_cleanup(
+        pending_signals,
         cleanup_state.clone(),
         session_lease
             .as_ref()
@@ -1169,13 +1175,23 @@ impl<F: FnOnce()> Drop for CleanupGuard<F> {
 }
 
 #[cfg(unix)]
+fn prepare_signal_cleanup() -> Result<Signals> {
+    Signals::new([SIGTERM, SIGHUP, SIGINT, SIGQUIT]).map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+fn prepare_signal_cleanup() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn install_signal_cleanup(
+    mut signals: Signals,
     state: Arc<Mutex<TerminalRestoreState>>,
     session_lease_path: Option<PathBuf>,
     session_dirs: Vec<PathBuf>,
     session_lease_io: Arc<Mutex<()>>,
 ) -> Result<()> {
-    let mut signals = Signals::new([SIGTERM, SIGHUP, SIGINT, SIGQUIT])?;
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
             let _ = restore_terminal(&state);
@@ -1199,6 +1215,7 @@ fn install_signal_cleanup(
 
 #[cfg(not(unix))]
 fn install_signal_cleanup(
+    _pending_signals: (),
     _state: Arc<Mutex<TerminalRestoreState>>,
     _session_lease_path: Option<PathBuf>,
     _session_dirs: Vec<PathBuf>,
@@ -2591,6 +2608,15 @@ fn update_prompt_buffer_for_forwarded_paste(text: &str, state: &mut AppState) ->
     }
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     if normalized.contains('\n') {
+        // Readline's bracketed-paste mode inserts line breaks into the edit
+        // buffer without submitting it. Do not claim the command is running
+        // until the shell emits CommandStart after the user confirms it.
+        // Multiline prompt buffers are outside this tracker's model, so make
+        // subsequent optimistic transitions wait for the shell marker too.
+        if state.child_bracketed_paste {
+            invalidate_prompt_tracking(state);
+            return None;
+        }
         let submitted = first_meaningful_submitted_paste_line(
             &normalized,
             &state.prompt_buffer,
@@ -4661,6 +4687,33 @@ pub(crate) mod tests {
 
         assert_eq!(&*buf.lock().unwrap(), b"sleep 5\n");
         assert_eq!(s.editor.buffer, "e");
+    }
+
+    #[test]
+    fn bracketed_newline_paste_waits_for_shell_confirmation() {
+        use crossterm::event::KeyCode;
+
+        let mut s = make_state();
+        s.shell_state = ShellState::AtPrompt;
+        s.child_bracketed_paste = true;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+
+        handle_paste("sleep 5\n".to_string(), &mut s, &mut w);
+
+        assert!(matches!(s.shell_state, ShellState::AtPrompt));
+        assert!(s.command_started_at.is_none());
+        assert!(!s.prompt_buffer_reliable);
+        assert_eq!(&*buf.lock().unwrap(), b"\x1b[200~sleep 5\n\x1b[201~");
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+
+        assert!(s.editor.buffer.is_empty());
+        assert_eq!(&*buf.lock().unwrap(), b"\x1b[200~sleep 5\n\x1b[201~e");
     }
 
     #[test]
