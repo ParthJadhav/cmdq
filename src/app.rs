@@ -588,12 +588,14 @@ pub fn run(cfg: AppConfig) -> Result<()> {
     let _terminal_guard = CleanupGuard::new(move || {
         let _ = restore_terminal(&cleanup_for_guard);
     });
+    let session_lease_io = Arc::new(Mutex::new(()));
     install_signal_cleanup(
         cleanup_state.clone(),
         session_lease
             .as_ref()
             .map(|lease| lease.path().to_path_buf()),
         pty.session_dirs().to_vec(),
+        session_lease_io.clone(),
     )
     .context("install signal cleanup")?;
     let mut stdout = io::stdout();
@@ -1103,7 +1105,11 @@ pub fn run(cfg: AppConfig) -> Result<()> {
 
         save_queue_if_dirty(&mut state, &queue_path);
         sync_queue_from_disk_if_due(&mut state, &queue_path, &mut last_queue_sync);
-        refresh_session_lease_if_due(&mut session_lease, &mut last_session_lease_refresh);
+        refresh_session_lease_if_due(
+            &mut session_lease,
+            &mut last_session_lease_refresh,
+            &session_lease_io,
+        );
 
         // 4. Repaint the panel if it should be visible.
         if let PanelLayout::Reserved { height } = layout
@@ -1167,11 +1173,18 @@ fn install_signal_cleanup(
     state: Arc<Mutex<TerminalRestoreState>>,
     session_lease_path: Option<PathBuf>,
     session_dirs: Vec<PathBuf>,
+    session_lease_io: Arc<Mutex<()>>,
 ) -> Result<()> {
     let mut signals = Signals::new([SIGTERM, SIGHUP, SIGINT, SIGQUIT])?;
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
             let _ = restore_terminal(&state);
+            // Serialize cleanup against the main loop's periodic lease
+            // refresh. Keep the guard until process exit so a refresh cannot
+            // recreate the lease after it has been removed.
+            let _lease_guard = session_lease_io
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(path) = session_lease_path.as_deref() {
                 let _ = std::fs::remove_file(path);
             }
@@ -1189,6 +1202,7 @@ fn install_signal_cleanup(
     _state: Arc<Mutex<TerminalRestoreState>>,
     _session_lease_path: Option<PathBuf>,
     _session_dirs: Vec<PathBuf>,
+    _session_lease_io: Arc<Mutex<()>>,
 ) -> Result<()> {
     Ok(())
 }
@@ -1446,12 +1460,16 @@ fn deferred_queue_change_status() -> &'static str {
 fn refresh_session_lease_if_due(
     lease: &mut Option<crate::session_lease::SessionLease>,
     last_refresh: &mut Instant,
+    session_lease_io: &Mutex<()>,
 ) {
     if last_refresh.elapsed() < SESSION_LEASE_REFRESH_INTERVAL {
         return;
     }
     *last_refresh = Instant::now();
     if let Some(lease) = lease {
+        let _lease_guard = session_lease_io
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = lease.refresh();
     }
 }
