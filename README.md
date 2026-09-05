@@ -321,3 +321,7 @@ cargo fmt --all
 ## License
 
 [MIT](LICENSE)
+
+## Author
+
+Created by [Parth Jadhav](https://www.parthjadhav.com/).
