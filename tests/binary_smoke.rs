@@ -2131,7 +2131,7 @@ fn running_press_any_key_prompt_releases_after_single_key_answer() {
     );
 
     let read_cmd = format!(
-        "printf 'Press any key to continue'; IFS= read -r -n 1 _; printf 'AFTER_ANY_KEY'; sleep 3; printf DONE > {}\r",
+        "printf 'Press any key to continue'; IFS= read -r -n 1 _; printf '\\nAFTER_ANY_KEY\\n'; sleep 3; printf DONE > {}\r",
         shell_quote(&done_file)
     );
     writer.write_all(read_cmd.as_bytes()).unwrap();
@@ -2149,7 +2149,7 @@ fn running_press_any_key_prompt_releases_after_single_key_answer() {
     writer.flush().unwrap();
     assert!(
         wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-            String::from_utf8_lossy(s).contains("AFTER_ANY_KEY")
+            contains_bytes(s, b"\r\nAFTER_ANY_KEY\r\n")
         }),
         "single-key answer did not reach child; output:\n{}",
         String::from_utf8_lossy(&accum)
@@ -2739,6 +2739,9 @@ fn binary_auto_installs_fish_integration_for_clean_home() {
     let mut cmd = CommandBuilder::new(bin.as_os_str());
     cmd.arg("--shell");
     cmd.arg(fish);
+    // This legacy harness does not emulate terminal replies. The shell
+    // matrix separately tests capability negotiation with actual replies.
+    cmd.env("fish_features", "no-query-term");
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", &home);
     cmd.env("XDG_DATA_HOME", &xdg);
@@ -2997,7 +3000,7 @@ fn restored_queue_startup_mentions_active_peer_session() {
 
     let mut accum = Vec::new();
     let reported_peer = wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-        contains_bytes(s, b"another cmdq session is active")
+        contains_bytes(s, b"another session active")
     });
 
     let _ = first_child.kill();
@@ -3095,7 +3098,7 @@ fn restored_queue_from_other_cwd_requires_double_resume_confirmation() {
     assert!(
         wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
             s.windows(b"\x1b]133;A".len()).any(|w| w == b"\x1b]133;A")
-                && contains_bytes(s, b"from ")
+                && contains_bytes(s, b"saved in ")
         }),
         "restored-cwd test never saw prompt and cwd warning; output:\n{}",
         String::from_utf8_lossy(&accum)
@@ -3774,6 +3777,10 @@ fn queued_command_origin_handles_bel_in_cwd() {
     std::thread::sleep(Duration::from_millis(300));
 
     let queue_path = xdg.join("cmdq").join("queue.json");
+    assert!(wait_until(Duration::from_secs(5), || file_contains(
+        &queue_path,
+        "BEL_CWD_TRACKED"
+    )));
     let queue_json = std::fs::read_to_string(&queue_path).unwrap_or_default();
     let saved: serde_json::Value = serde_json::from_str(&queue_json).unwrap();
     let expected = std::fs::canonicalize(&bel_cwd)

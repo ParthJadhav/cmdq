@@ -75,8 +75,46 @@ impl CursorTracker {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.step(b);
+        let mut idx = 0;
+        while idx < bytes.len() {
+            if matches!(self.state, State::Ground) {
+                // Runs of printable ASCII are the bulk of most output; advance
+                // the column arithmetically instead of one byte at a time.
+                let run = bytes[idx..]
+                    .iter()
+                    .take_while(|&&b| (0x20..=0x7e).contains(&b))
+                    .count();
+                if run > 0 {
+                    self.printable_run(run);
+                    idx += run;
+                    continue;
+                }
+            }
+            self.step(bytes[idx]);
+            idx += 1;
+        }
+    }
+
+    /// Equivalent to `n` consecutive `printable_width(1)` calls.
+    fn printable_run(&mut self, n: usize) {
+        let cols = self.cols.max(1) as usize;
+        let col = (self.col as usize).min(cols);
+        if col + n <= cols {
+            self.col = (col + n) as u16;
+            return;
+        }
+        // Fill the current line to the deferred-wrap column, then every
+        // further `cols` characters is one wrap that again ends at `cols`.
+        let rest = n - (cols - col);
+        let full_lines = rest / cols;
+        let remainder = rest % cols;
+        self.row =
+            (self.row as usize + full_lines).min(self.rows.saturating_sub(1) as usize) as u16;
+        if remainder > 0 {
+            self.linefeed();
+            self.col = remainder as u16;
+        } else {
+            self.col = cols as u16;
         }
     }
 
@@ -291,6 +329,64 @@ fn is_utf8_continuation(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_feed_matches_byte_at_a_time_stepping() {
+        let alphabet: &[&[u8]] = &[
+            b"a",
+            b"Z",
+            b" ",
+            b"~",
+            b"\r",
+            b"\n",
+            b"\t",
+            b"\x08",
+            b"\x1b[3C",
+            b"\x1b[2;5H",
+            b"\x1b[K",
+            b"\x1b7",
+            b"\x1b8",
+            b"\x1b]0;title\x07",
+            "é".as_bytes(),
+            "漢".as_bytes(),
+            b"\xe6",
+            b"\x1b",
+            b"\x1bP1$r\x1b\\",
+        ];
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..400 {
+            let (cols, rows) = ((next() % 40 + 1) as u16, (next() % 12 + 1) as u16);
+            let mut input = Vec::new();
+            for _ in 0..(next() % 300) {
+                let piece = alphabet[(next() as usize) % alphabet.len()];
+                let repeat = if piece.len() == 1 && piece[0].is_ascii_graphic() {
+                    (next() % 90) as usize + 1
+                } else {
+                    1
+                };
+                for _ in 0..repeat {
+                    input.extend_from_slice(piece);
+                }
+            }
+            let mut bulk = CursorTracker::new(cols, rows);
+            let mut single = CursorTracker::new(cols, rows);
+            bulk.feed(&input);
+            for &b in &input {
+                single.step(b);
+            }
+            assert_eq!(
+                (bulk.col, bulk.row, bulk.state),
+                (single.col, single.row, single.state),
+                "case {case}: cols={cols} rows={rows} input={input:?}"
+            );
+        }
+    }
 
     #[test]
     fn tracks_basic_print_crlf_and_cursor_moves() {

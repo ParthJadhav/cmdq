@@ -49,6 +49,7 @@ pub struct Detector {
     state: State,
     body: Vec<u8>,
     sequence_start: Option<usize>,
+    cmdq_only: bool,
 }
 
 impl Default for Detector {
@@ -63,6 +64,16 @@ impl Detector {
             state: State::Normal,
             body: Vec::new(),
             sequence_start: None,
+            cmdq_only: false,
+        }
+    }
+
+    /// Only cmdq's hooks drive queue dispatch. Native Fish markers and other
+    /// terminal integrations may emit the same lifecycle a second time.
+    pub fn for_cmdq() -> Self {
+        Self {
+            cmdq_only: true,
+            ..Self::new()
         }
     }
 
@@ -79,14 +90,30 @@ impl Detector {
         if !matches!(self.state, State::Normal) {
             self.sequence_start = None;
         }
-        for (idx, &b) in bytes.iter().enumerate() {
-            self.step(idx, b, &mut out);
+        let mut idx = 0;
+        while idx < bytes.len() {
+            if matches!(self.state, State::Normal) {
+                // Plain text is the common case: jump straight to the next
+                // escape instead of stepping the state machine per byte.
+                match bytes[idx..].iter().position(|&b| b == ESC) {
+                    Some(offset) => idx += offset,
+                    None => break,
+                }
+            }
+            self.step(idx, bytes[idx], &mut out);
+            idx += 1;
         }
         out
     }
 
     fn finish_osc(&mut self, idx: usize, out: &mut Vec<LocatedEvent>) {
-        if let Some(ev) = parse_osc(&self.body) {
+        let allowed = !self.cmdq_only
+            || !self.body.starts_with(b"133;")
+            || self
+                .body
+                .split(|b| *b == b';')
+                .any(|part| part == b"cmdq=1");
+        if allowed && let Some(ev) = parse_osc(&self.body) {
             out.push(LocatedEvent {
                 event: ev,
                 start: self.sequence_start.unwrap_or(0),
@@ -214,6 +241,20 @@ fn hex_value(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmdq_detector_ignores_duplicate_foreign_lifecycle() {
+        let mut detector = Detector::for_cmdq();
+        let events = detector.feed(b"\x1b]133;C\x1b\\\x1b]133;C;cmdq=1\x07\x1b]133;D;7\x1b\\\x1b]133;D;7;cmdq=1\x07\x1b]133;A;cmdq=1\x07\x1b]133;A\x1b\\\x1b]133;B\x1b\\");
+        assert_eq!(
+            events,
+            vec![
+                Event::CommandStart,
+                Event::CommandEnd { exit_code: Some(7) },
+                Event::PromptStart
+            ]
+        );
+    }
 
     fn events(bytes: &[u8]) -> Vec<Event> {
         let mut d = Detector::new();

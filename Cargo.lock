@@ -142,6 +142,7 @@ dependencies = [
  "env_logger",
  "fs2",
  "log",
+ "nix",
  "portable-pty",
  "serde",
  "serde_json",

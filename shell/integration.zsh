@@ -4,8 +4,8 @@
 #
 # Safe to source multiple times. No-op if not running under cmdq.
 
-if [[ -n "$CMDQ_ACTIVE" ]] && [[ -z "$CMDQ_INTEGRATION_LOADED" ]]; then
-    CMDQ_INTEGRATION_LOADED=1
+if [[ -n "$CMDQ_ACTIVE" ]] && [[ "$CMDQ_INTEGRATION_LOADED" != 2 ]]; then
+    CMDQ_INTEGRATION_LOADED=2
 
     _cmdq_emit_cwd() {
         local cwd=$PWD
@@ -23,15 +23,15 @@ if [[ -n "$CMDQ_ACTIVE" ]] && [[ -z "$CMDQ_INTEGRATION_LOADED" ]]; then
         # decisions against the directory the next command would actually run in.
         _cmdq_emit_cwd
         if [[ -n "$_CMDQ_IN_CMD" ]]; then
-            printf '\e]133;D;%s\a' "$exit"
+            printf '\e]133;D;%s;cmdq=1\a' "$exit"
             unset _CMDQ_IN_CMD
         fi
-        printf '\e]133;A\a'
+        printf '\e]133;A;cmdq=1\a'
     }
 
     _cmdq_preexec() {
         _CMDQ_IN_CMD=1
-        printf '\e]133;C\a'
+        printf '\e]133;C;cmdq=1\a'
     }
 
     # Append our hooks without clobbering any existing hooks.

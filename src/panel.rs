@@ -32,7 +32,7 @@ use crate::queue::Queue;
 
 /// The largest help panel we'll render. The actual height is clamped to
 /// what fits above the bottom edge.
-const HELP_MAX_ROWS: u16 = 28;
+const HELP_MAX_ROWS: u16 = 29;
 
 /// Snapshot of the cmdq state the panel needs to render itself. Borrowed
 /// per-frame; no allocation in the hot path beyond what crossterm does.
@@ -47,6 +47,7 @@ pub struct PanelState<'a> {
     pub editing_index: Option<usize>,
     pub status: &'a str,
     pub pending_quit: bool,
+    pub pending_clear: bool,
     pub show_help: bool,
     pub max_queue_visible: u16,
 }
@@ -307,14 +308,14 @@ fn paint_normal(
 
     // Header: dim divider that fills the row, optionally embedding the
     // current status message.
-    out.queue(MoveTo(0, row))?;
-    out.queue(Clear(ClearType::CurrentLine))?;
-    paint_header(out, view, total_cols)?;
-    row += 1;
-
     // Queue list. Reserve `panel_height - 3` rows for items (header(1) +
     // input(1) + hints(1) accounted for).
     let list_capacity = panel_height.saturating_sub(3) as usize;
+
+    out.queue(MoveTo(0, row))?;
+    out.queue(Clear(ClearType::CurrentLine))?;
+    paint_header(out, view, total_cols, list_capacity)?;
+    row += 1;
     let queue_start = queue_window_start(view, list_capacity);
     for (i, item) in view
         .queue
@@ -401,12 +402,36 @@ fn queue_window_start(view: &PanelState<'_>, list_capacity: usize) -> usize {
         .min(max_start)
 }
 
-fn paint_header(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> io::Result<()> {
-    let header = if view.status.is_empty() {
-        " cmdq ".to_string()
-    } else {
-        format!(" cmdq │ {} ", display_control_chars(view.status))
-    };
+/// Rows of the queue list that don't fit, as `(first_shown, last_shown, total)`
+/// (1-based) — `None` when every item is on screen.
+fn queue_overflow(view: &PanelState<'_>, list_capacity: usize) -> Option<(usize, usize, usize)> {
+    let total = view.queue.len();
+    let shown = total
+        .min(list_capacity)
+        .min(view.max_queue_visible as usize);
+    if shown >= total {
+        return None;
+    }
+    let start = queue_window_start(view, shown);
+    Some((start + 1, start + shown, total))
+}
+
+fn paint_header(
+    out: &mut impl Write,
+    view: &PanelState<'_>,
+    total_cols: u16,
+    list_capacity: usize,
+) -> io::Result<()> {
+    let mut header = String::from(" cmdq");
+    // Without this the list silently truncates and the user has no idea
+    // more commands are waiting below the fold.
+    if let Some((first, last, total)) = queue_overflow(view, list_capacity) {
+        header.push_str(&format!(" · {total} queued, showing {first}–{last}"));
+    }
+    if !view.status.is_empty() {
+        header.push_str(&format!(" │ {}", display_control_chars(view.status)));
+    }
+    header.push(' ');
     let header_width = display_width(&header);
     let cols = total_cols as usize;
     out.queue(SetForegroundColor(Color::DarkGrey))?;
@@ -422,22 +447,47 @@ fn paint_header(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) ->
 }
 
 fn paint_hints(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> io::Result<()> {
+    let pause_label = if view.queue.paused { "resume" } else { "pause" };
     if total_cols < 88 {
-        let hint = if view.pending_quit {
-            "[^D again to quit]"
+        let pause_chip = format!("[^X {pause_label}]");
+        let chips: Vec<&str> = if view.pending_quit {
+            vec!["[^D again to quit]"]
+        } else if view.pending_clear {
+            vec!["[^K again to clear queue]"]
         } else if view.editing_index.is_some() {
-            "[Esc cancel] [Enter save] [^D delete] [Alt-Up/Down reorder]"
+            vec![
+                "[Esc cancel]",
+                "[Enter save]",
+                "[^D delete]",
+                "[Alt-Up/Down reorder]",
+                "[Tab chain]",
+            ]
         } else if view.child_input_prompt {
-            "[keys -> child] [Enter submit] [^C interrupt] [F1 help]"
+            vec![
+                "[keys -> child]",
+                "[Enter submit]",
+                "[^C interrupt]",
+                "[F1 help]",
+            ]
         } else if view.passthrough_to_child {
-            "[keys -> child] [Esc Esc / ^\\ exit raw]"
-        } else if view.running {
-            "[Enter add] [Up edit] [Tab chain] [^X pause] [^\\ SIGQUIT] [? help]"
+            vec!["[keys -> child]", "[Esc Esc / ^\\ exit raw]"]
         } else {
-            "[Enter add] [Up edit] [Tab chain] [^X pause] [Esc Esc raw] [? help]"
+            vec![
+                "[Enter add]",
+                "[Up edit]",
+                "[Tab chain]",
+                &pause_chip,
+                "[^K clear]",
+                if view.running {
+                    "[^\\ SIGQUIT]"
+                } else {
+                    "[Esc Esc raw]"
+                },
+                "[? help]",
+            ]
         };
         out.queue(SetForegroundColor(Color::Grey))?;
-        out.queue(Print(clip_to_width(hint, total_cols as usize)))?;
+        out.queue(Print(fit_chips(&chips, total_cols as usize)))?;
         out.queue(ResetColor)?;
         return Ok(());
     }
@@ -448,6 +498,14 @@ fn paint_hints(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> 
         sep(out)?;
         out.queue(SetForegroundColor(Color::Grey))?;
         out.queue(Print("any other key keeps working"))?;
+        out.queue(ResetColor)?;
+        return Ok(());
+    }
+    if view.pending_clear {
+        chip(out, "^K", "again to clear the queue")?;
+        sep(out)?;
+        out.queue(SetForegroundColor(Color::Grey))?;
+        out.queue(Print("any other key keeps it"))?;
         out.queue(ResetColor)?;
         return Ok(());
     }
@@ -484,7 +542,6 @@ fn paint_hints(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> 
         return Ok(());
     }
 
-    let pause_label = if view.queue.paused { "resume" } else { "pause" };
     chip(out, "⏎", "add")?;
     gap(out)?;
     chip(out, "↑", "edit")?;
@@ -503,6 +560,26 @@ fn paint_hints(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> 
     sep(out)?;
     chip(out, "?", "help")?;
     Ok(())
+}
+
+/// Join as many whole chips as fit in `width`, so a narrow terminal drops
+/// trailing hints instead of cutting one in half.
+fn fit_chips(chips: &[&str], width: usize) -> String {
+    let mut line = String::new();
+    for chip in chips {
+        let needed = display_width(&line) + usize::from(!line.is_empty()) + display_width(chip);
+        if needed > width {
+            break;
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(chip);
+    }
+    if line.is_empty() {
+        return clip_to_width(chips.first().copied().unwrap_or(""), width);
+    }
+    line
 }
 
 fn chip(out: &mut impl Write, key: &str, label: &str) -> io::Result<()> {
@@ -571,7 +648,7 @@ fn paint_help(
     out.queue(Print("─".repeat(pad)))?;
     out.queue(ResetColor)?;
 
-    // The full layout fits in HELP_MAX_ROWS = 28 lines including the title.
+    // The full layout fits in HELP_MAX_ROWS = 29 lines including the title.
     // A compact layout keeps every essential shortcut visible in a standard
     // 24-row terminal (21 content rows after leaving shell context + title).
     let full_lines: &[(&str, &str)] = &[
@@ -593,7 +670,7 @@ fn paint_help(
         ("", ""),
         ("queue control", ""),
         ("Ctrl-X", "pause / resume auto-dispatch"),
-        ("Ctrl-K", "clear the entire queue"),
+        ("Ctrl-K", "clear the queue (press twice to confirm)"),
         ("", ""),
         ("modes", ""),
         ("Ctrl-Q", "force the panel open at the shell prompt"),
@@ -602,6 +679,7 @@ fn paint_help(
         ("", ""),
         ("misc", ""),
         ("Ctrl-C", "SIGINT the running command (pauses queue)"),
+        ("Ctrl-Z", "suspend the running command"),
         ("Ctrl-D", "quit cmdq (twice if queue is non-empty)"),
         ("Ctrl/Alt edit keys", "line movement, backspace, word-jump"),
         ("F1 / ?", "show this help · Esc / Enter dismisses"),
@@ -620,7 +698,7 @@ fn paint_help(
         ("Alt-↑ / Alt-↓", "reorder the item being edited"),
         ("queue control", ""),
         ("Ctrl-X", "pause / resume auto-dispatch"),
-        ("Ctrl-K", "clear the entire queue"),
+        ("Ctrl-K", "clear the queue (press twice to confirm)"),
         ("modes", ""),
         ("Ctrl-Q", "force the panel open at the shell prompt"),
         ("Esc Esc", "raw input — keys go to the running app"),
@@ -894,6 +972,7 @@ mod tests {
             editing_index: None,
             status: "",
             pending_quit: false,
+            pending_clear: false,
             show_help: false,
             max_queue_visible: 8,
         };
@@ -926,12 +1005,13 @@ mod tests {
             editing_index: None,
             status: "added: echo 界🙂",
             pending_quit: false,
+            pending_clear: false,
             show_help: false,
             max_queue_visible: 8,
         };
         let mut out = Vec::new();
 
-        paint_header(&mut out, &view, 18).unwrap();
+        paint_header(&mut out, &view, 18, 8).unwrap();
 
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
         assert!(
@@ -954,6 +1034,7 @@ mod tests {
             editing_index: None,
             status: "",
             pending_quit: false,
+            pending_clear: false,
             show_help: false,
             max_queue_visible: 8,
         };
@@ -982,6 +1063,7 @@ mod tests {
             editing_index: None,
             status: "",
             pending_quit: false,
+            pending_clear: false,
             show_help: false,
             max_queue_visible: 8,
         };
@@ -1008,6 +1090,7 @@ mod tests {
             editing_index: None,
             status: "",
             pending_quit: false,
+            pending_clear: false,
             show_help: false,
             max_queue_visible: 8,
         };
@@ -1038,11 +1121,118 @@ mod tests {
             editing_index: Some(11),
             status: "",
             pending_quit: false,
+            pending_clear: false,
             show_help: false,
             max_queue_visible: 8,
         };
 
         assert_eq!(queue_window_start(&view, 8), 4);
+    }
+
+    fn view_with<'a>(queue: &'a Queue, running: bool) -> PanelState<'a> {
+        PanelState {
+            queue,
+            running,
+            force_queue: false,
+            passthrough_to_child: false,
+            child_input_prompt: false,
+            input_buffer: "",
+            input_cursor: 0,
+            editing_index: None,
+            status: "",
+            pending_quit: false,
+            pending_clear: false,
+            show_help: false,
+            max_queue_visible: 8,
+        }
+    }
+
+    #[test]
+    fn header_reports_hidden_queue_items() {
+        let mut queue = Queue::new();
+        for i in 0..12 {
+            queue.push(format!("cmd {i}"), false);
+        }
+        let mut view = view_with(&queue, true);
+        let mut out = Vec::new();
+        paint_header(&mut out, &view, 100, 8).unwrap();
+        let printable = strip_ansi(&String::from_utf8_lossy(&out));
+        assert!(
+            printable.contains("12 queued, showing 1–8"),
+            "header={printable:?}"
+        );
+
+        view.editing_index = Some(11);
+        view.status = "saved: cmd 11";
+        let mut out = Vec::new();
+        paint_header(&mut out, &view, 100, 8).unwrap();
+        let printable = strip_ansi(&String::from_utf8_lossy(&out));
+        assert!(
+            printable.contains("12 queued, showing 5–12"),
+            "header={printable:?}"
+        );
+        assert!(printable.contains("saved: cmd 11"), "header={printable:?}");
+    }
+
+    #[test]
+    fn header_stays_plain_when_every_item_fits() {
+        let mut queue = Queue::new();
+        queue.push("cmd", false);
+        let view = view_with(&queue, true);
+        let mut out = Vec::new();
+        paint_header(&mut out, &view, 100, 8).unwrap();
+        let printable = strip_ansi(&String::from_utf8_lossy(&out));
+        assert!(!printable.contains("queued"), "header={printable:?}");
+    }
+
+    #[test]
+    fn narrow_hints_track_pause_state_and_offer_clear() {
+        let mut queue = Queue::new();
+        queue.push("cmd", false);
+        queue.paused = true;
+        let view = view_with(&queue, true);
+        let mut out = Vec::new();
+        paint_hints(&mut out, &view, 80).unwrap();
+        let printable = strip_ansi(&String::from_utf8_lossy(&out));
+        assert!(printable.contains("[^X resume]"), "hints={printable:?}");
+        assert!(printable.contains("[^K clear]"), "hints={printable:?}");
+        assert!(!printable.contains("pause"), "hints={printable:?}");
+    }
+
+    #[test]
+    fn narrow_hints_drop_whole_chips_instead_of_cutting_one() {
+        let queue = Queue::new();
+        let view = view_with(&queue, true);
+        for cols in [40u16, 52, 60, 70, 87] {
+            let mut out = Vec::new();
+            paint_hints(&mut out, &view, cols).unwrap();
+            let printable = strip_ansi(&String::from_utf8_lossy(&out));
+            assert!(
+                display_width(&printable) <= cols as usize,
+                "{cols}: {printable:?}"
+            );
+            assert!(printable.ends_with(']'), "{cols}: {printable:?}");
+            assert!(
+                printable.starts_with("[Enter add]"),
+                "{cols}: {printable:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_clear_hint_replaces_regular_hints() {
+        let mut queue = Queue::new();
+        queue.push("cmd", false);
+        let mut view = view_with(&queue, true);
+        view.pending_clear = true;
+        for cols in [60u16, 120] {
+            let mut out = Vec::new();
+            paint_hints(&mut out, &view, cols).unwrap();
+            let printable = strip_ansi(&String::from_utf8_lossy(&out));
+            assert!(printable.contains("^K"), "{cols}: {printable:?}");
+            assert!(printable.contains("again"), "{cols}: {printable:?}");
+            assert!(!printable.contains("add"), "{cols}: {printable:?}");
+        }
     }
 
     fn strip_ansi(s: &str) -> String {

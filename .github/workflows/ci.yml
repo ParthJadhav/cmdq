@@ -49,9 +49,17 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
+      - name: Install shell and interactive-program test matrix (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish dash vim less tmux
+      - name: Install shell and interactive-program test matrix (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish bash tmux
       - name: Build
         run: cargo build --verbose --all-targets
       - name: Test
+        env:
+          CMDQ_REQUIRE_SHELL_MATRIX: "1"
         run: cargo test --verbose
 
   docs:

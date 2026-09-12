@@ -19,7 +19,7 @@ struct Cli {
     print_integration: Option<String>,
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<std::process::ExitCode> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .target(env_logger::Target::Stderr)
         .init();
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     if let Some(shell) = cli.print_integration.as_deref() {
         let snippet = shell_integration::snippet_for(shell)?;
         print!("{snippet}");
-        return Ok(());
+        return Ok(std::process::ExitCode::SUCCESS);
     }
 
     if cli.install_integration {
@@ -39,8 +39,9 @@ fn main() -> Result<()> {
             shell_integration::install_for_current_shell()?
         };
         println!("{report}");
-        return Ok(());
+        return Ok(std::process::ExitCode::SUCCESS);
     }
 
-    app::run(app::AppConfig { shell: cli.shell })
+    app::run_with_exit_status(app::AppConfig { shell: cli.shell })
+        .map(|status| std::process::ExitCode::from(status.min(255) as u8))
 }

@@ -56,7 +56,29 @@ impl ShellKind {
 }
 
 pub fn snippet_for(shell: &str) -> Result<&'static str> {
-    ShellKind::detect_from_path(shell).snippet()
+    let kind = ShellKind::detect_from_path(shell);
+    if kind == ShellKind::Sh {
+        return Err(unsupported_shell_error(shell));
+    }
+    kind.snippet()
+}
+
+/// Explain *why* a shell has no integration. Blaming "POSIX sh" for a typo
+/// like `--shell zhs` or an unknown shell like `nu` sends people hunting for
+/// the wrong problem.
+fn unsupported_shell_error(shell: &str) -> anyhow::Error {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell);
+    match name {
+        "sh" | "dash" | "ash" => anyhow!(
+            "POSIX {name} has no reliable preexec hook; use zsh, bash, or fish for cmdq integration"
+        ),
+        _ => anyhow!(
+            "unsupported shell `{name}`; cmdq integration is available for zsh, bash, and fish"
+        ),
+    }
 }
 
 /// Determine the user's current shell from $SHELL.
@@ -69,8 +91,10 @@ pub fn rc_file_for(shell: ShellKind) -> Option<PathBuf> {
     Some(match shell {
         ShellKind::Zsh => zsh_dot_dir()?.join(".zshrc"),
         ShellKind::Bash => dirs::home_dir()?.join(".bashrc"),
-        ShellKind::Fish => dirs::home_dir()?
-            .join(".config")
+        ShellKind::Fish => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .and_then(crate::paths::absolute_path)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))?
             .join("fish")
             .join("config.fish"),
         ShellKind::Sh => return None,
@@ -118,6 +142,9 @@ pub fn install_for_current_shell() -> Result<String> {
 
 pub fn install_for_shell(shell_path: &str) -> Result<String> {
     let kind = ShellKind::detect_from_path(shell_path);
+    if kind == ShellKind::Sh {
+        return Err(unsupported_shell_error(shell_path));
+    }
     let script = write_integration_script(kind)?;
     let rc = rc_file_for(kind).ok_or_else(|| anyhow!("could not determine rc file location"))?;
 
@@ -235,19 +262,33 @@ pub(crate) fn write_file_atomic(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 fn writable_rc_path(path: &Path) -> Result<PathBuf> {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return Ok(path.to_path_buf());
-    };
-    if !meta.file_type().is_symlink() {
-        return Ok(path.to_path_buf());
+    let mut current = path.to_path_buf();
+    // Follow the entire chain even when its final target does not exist yet.
+    // canonicalize cannot resolve that case; renaming onto an intermediate
+    // symlink would silently break a dotfiles manager's links.
+    for _ in 0..40 {
+        let meta = match std::fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(current),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", current.display()));
+            }
+        };
+        if !meta.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let target = std::fs::read_link(&current)
+            .with_context(|| format!("reading symlink {}", current.display()))?;
+        current = if target.is_absolute() {
+            target
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(target)
+        };
     }
-    let target =
-        std::fs::read_link(path).with_context(|| format!("reading symlink {}", path.display()))?;
-    if target.is_absolute() {
-        Ok(target)
-    } else {
-        Ok(path.parent().unwrap_or_else(|| Path::new(".")).join(target))
-    }
+    Err(anyhow!("too many symlinks resolving {}", path.display()))
 }
 
 fn monotonic_suffix() -> u128 {
@@ -267,6 +308,21 @@ pub(crate) fn shell_single_quote(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_shell_error_names_the_shell_instead_of_blaming_sh() {
+        let err = snippet_for("/opt/homebrew/bin/nu").unwrap_err().to_string();
+        assert!(err.contains("unsupported shell `nu`"), "{err}");
+        assert!(!err.contains("POSIX"), "{err}");
+
+        let err = snippet_for("zhs").unwrap_err().to_string();
+        assert!(err.contains("`zhs`"), "{err}");
+
+        for posix in ["sh", "/bin/dash", "/bin/ash"] {
+            let err = snippet_for(posix).unwrap_err().to_string();
+            assert!(err.contains("POSIX"), "{posix}: {err}");
+        }
+    }
 
     #[test]
     fn detect_shell_kind() {
@@ -312,7 +368,7 @@ mod tests {
         assert!(BASH_SNIPPET.contains("_cmdq_emit_cwd\n        if [[ -n \"$_CMDQ_IN_CMD\" ]]"));
         assert!(ZSH_SNIPPET.contains("_cmdq_emit_cwd\n        if [[ -n \"$_CMDQ_IN_CMD\" ]]"));
         assert!(FISH_SNIPPET.contains(
-            "set -l exit $status\n        _cmdq_emit_cwd\n        printf '\\e]133;D;%s\\a' $exit"
+            "set -l exit $status\n        _cmdq_emit_cwd\n        printf '\\e]133;D;%s;cmdq=1\\a' $exit"
         ));
     }
 
@@ -337,6 +393,21 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".cmdq-tmp-"))
             .count();
         assert_eq!(temp_files, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rc_write_preserves_a_chain_with_a_missing_final_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let rc = temp.path().join("rc");
+        let middle = temp.path().join("middle");
+        let target = temp.path().join("dotfiles/rc");
+        std::os::unix::fs::symlink("middle", &rc).unwrap();
+        std::os::unix::fs::symlink("dotfiles/rc", &middle).unwrap();
+        write_rc_atomic(&rc, "# config\n").unwrap();
+        assert!(rc.is_symlink());
+        assert!(middle.is_symlink());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "# config\n");
     }
 
     #[test]

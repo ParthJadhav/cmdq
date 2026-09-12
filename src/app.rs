@@ -16,20 +16,23 @@
 //! scrolling region, resize the PTY back to the full terminal height, and
 //! get out of the program's way until it flips alt-screen back off.
 
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+#[cfg(any(not(unix), test))]
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use crossterm::{
     QueueableCommand,
     cursor::{MoveTo, Show},
     event::{
         DisableBracketedPaste, EnableBracketedPaste, Event as CtEvent, KeyEvent, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
@@ -76,9 +79,14 @@ const QUEUE_PANEL_DELAY: Duration = Duration::from_millis(1500);
 /// twice fresh.
 const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 
+/// Ctrl-K throws away every queued command with no undo, and it doubles as a
+/// readline kill-line reflex. Ask for a second press within this window.
+const CLEAR_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
+
 /// Status messages ("added: ls", "queue cleared", …) fade after this so the
-/// header isn't a permanent log of the last action.
-const STATUS_TTL: Duration = Duration::from_secs(2);
+/// header isn't a permanent log of the last action. Long enough to read a
+/// full sentence, and never shorter than any confirmation window it explains.
+const STATUS_TTL: Duration = Duration::from_secs(4);
 
 /// Running a restored queue from a different directory is high-risk enough to
 /// require two close Ctrl-X presses, like a small "are you sure?" gesture.
@@ -91,15 +99,24 @@ const ESC_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 /// Maximum interval between repaints when the panel is visible. We also
 /// repaint immediately when state changes, so this is just a backstop for
 /// the status-message fade timer.
-const PANEL_REPAINT_INTERVAL: Duration = Duration::from_millis(80);
+const PANEL_MIN_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Maximum time to hold a trailing escape-sequence fragment while waiting to
 /// see if it becomes an alt-screen or bracketed-paste mode switch.
 const MODE_PENDING_TIMEOUT: Duration = Duration::from_millis(600);
 
+/// How long to wait for the terminal's cursor-position reply at startup.
+/// Every real terminal answers well within this; the fallback is the old
+/// bottom-row assumption.
+const CURSOR_QUERY_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// PTY reader idle timeout. We don't poll for keys longer than this so the
 /// status fade and time-driven panel state transitions stay snappy.
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Poll timeout when nothing is pending. PTY output wakes the loop through a
+/// pipe, so this only bounds the latency of time-driven transitions.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How often an idle session checks whether another cmdq session edited the
 /// shared queue file.
@@ -132,6 +149,7 @@ struct TerminalRestoreState {
 }
 
 struct AppState {
+    queue_supported: bool,
     queue: Queue,
     editor: LineEditor,
     shell_state: ShellState,
@@ -142,6 +160,7 @@ struct AppState {
     child_alt_screen: bool,
     child_mouse_capture: bool,
     child_focus_events: bool,
+    child_tty_input: bool,
     force_queue: bool,
     show_help: bool,
     terminal_allows_panel: bool,
@@ -149,6 +168,7 @@ struct AppState {
     last_sigint_at: Option<Instant>,
     /// When the current command started (set on CommandStart, cleared on End).
     command_started_at: Option<Instant>,
+    command_tty_check_after: Option<Instant>,
     /// Approximation of what the user has typed at the shell prompt. We only
     /// use this to decide whether an Enter key plausibly started a command
     /// before the shell integration's preexec marker arrives.
@@ -177,6 +197,11 @@ struct AppState {
     /// Timestamp of first Ctrl-D when queue was non-empty; second within
     /// QUIT_CONFIRM_WINDOW actually quits.
     pending_quit_at: Option<Instant>,
+    /// First Ctrl-K press awaiting confirmation (see `CLEAR_CONFIRM_WINDOW`).
+    pending_clear_at: Option<Instant>,
+    /// Exit status of the most recently finished command; lets a chained
+    /// draft submitted at the prompt honour the real previous result.
+    last_exit_code: Option<i32>,
     /// Timestamp of the most recent bare-Esc press; a second Esc within
     /// ESC_DOUBLE_TAP_WINDOW toggles passthrough.
     last_esc_at: Option<Instant>,
@@ -202,8 +227,16 @@ struct AppState {
 }
 
 impl AppState {
+    fn tty_input_requested(&self, pty: &ShellPty) -> bool {
+        matches!(self.shell_state, ShellState::Running)
+            && self
+                .command_tty_check_after
+                .is_some_and(|after| Instant::now() >= after)
+            && pty.needs_direct_input()
+    }
+
     fn effective_passthrough(&self) -> bool {
-        self.manual_passthrough || self.auto_passthrough
+        !self.queue_supported || self.manual_passthrough || self.auto_passthrough
     }
 
     fn command_long_running(&self) -> bool {
@@ -221,14 +254,16 @@ impl AppState {
     ///   * force_queue is on, OR
     ///   * help is open, OR
     ///   * the queue is paused with items pending (so the user can see *why*
-    ///     nothing is auto-dispatching after a ^C and discover ^X to resume).
+    ///     nothing is auto-dispatching after a ^C and discover ^X to resume), OR
+    ///   * an uncommitted draft/edit is in the input (so a command finishing
+    ///     mid-keystroke doesn't swallow what the user was typing).
     ///
     /// Note: we deliberately do NOT keep the panel visible just because a
     /// status message is fresh. Doing so would steal keystrokes from the
     /// shell for ~2 s after every status update — a worse footgun than the
     /// momentary status-not-seen issue it would fix.
     fn panel_should_be_visible(&self) -> bool {
-        if self.auto_passthrough {
+        if !self.queue_supported || self.auto_passthrough {
             return false;
         }
         if !self.terminal_allows_panel {
@@ -238,6 +273,7 @@ impl AppState {
             || self.force_queue
             || self.show_help
             || (self.queue.paused && !self.queue.is_empty())
+            || self.draft_pending()
     }
 
     /// Whether cmdq's editor owns keystrokes (rather than forwarding to PTY).
@@ -261,6 +297,19 @@ impl AppState {
         self.pending_quit_at
             .map(|t| t.elapsed() <= QUIT_CONFIRM_WINDOW)
             .unwrap_or(false)
+    }
+
+    fn pending_clear_active(&self) -> bool {
+        self.pending_clear_at
+            .map(|t| t.elapsed() <= CLEAR_CONFIRM_WINDOW)
+            .unwrap_or(false)
+    }
+
+    /// The user has typed (or is editing) something in the queue input that
+    /// has not been committed yet. Hiding the panel would make it vanish
+    /// silently and resurface on the next long command.
+    fn draft_pending(&self) -> bool {
+        self.editor.editing_index.is_some() || !self.editor.buffer.is_empty()
     }
 
     fn set_status(&mut self, s: impl Into<String>) {
@@ -378,23 +427,30 @@ impl OutputTail {
         }
     }
 
+    const MAX_TAIL_CHARS: usize = 200;
+
     fn push(&mut self, c: char) {
         self.text.push(c);
-        const MAX_TAIL_CHARS: usize = 200;
-        let extra = self.text.chars().count().saturating_sub(MAX_TAIL_CHARS);
-        if extra > 0 {
-            let drain_to = self
-                .text
-                .char_indices()
-                .nth(extra)
-                .map(|(i, _)| i)
-                .unwrap_or(self.text.len());
+        // Only ASCII ever lands here, so bytes == chars. Trim in bulk once the
+        // buffer has doubled instead of rescanning the tail on every byte;
+        // that rescan used to dominate cmdq's per-byte output cost.
+        if self.text.len() > Self::MAX_TAIL_CHARS * 2 {
+            let drain_to = self.text.len() - Self::MAX_TAIL_CHARS;
             self.text.drain(..drain_to);
         }
     }
 
+    /// The last `MAX_TAIL_CHARS` characters of output on the current line.
+    fn tail(&self) -> &str {
+        let start = self.text.len().saturating_sub(Self::MAX_TAIL_CHARS);
+        let start = (start..=self.text.len())
+            .find(|&i| self.text.is_char_boundary(i))
+            .unwrap_or(0);
+        &self.text[start..]
+    }
+
     fn looks_like_input_prompt(&self) -> bool {
-        let trimmed = self.text.trim_end();
+        let trimmed = self.tail().trim_end();
         if trimmed.is_empty() {
             return false;
         }
@@ -427,7 +483,7 @@ impl OutputTail {
     }
 
     fn looks_like_any_key_prompt(&self) -> bool {
-        let lower = self.text.trim_end().to_ascii_lowercase();
+        let lower = self.tail().trim_end().to_ascii_lowercase();
         lower.contains("press any key") || lower.contains("hit any key")
     }
 }
@@ -512,6 +568,15 @@ fn looks_like_repl_prompt(trimmed: &str) -> bool {
 }
 
 pub fn run(cfg: AppConfig) -> Result<()> {
+    run_with_exit_status(cfg).map(|_| ())
+}
+
+/// Run a session and preserve the hosted shell's exit status for CLI callers.
+pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
+    anyhow::ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "cmdq needs an interactive terminal on stdin and stdout; run cmdq directly in your terminal"
+    );
     // We export CMDQ_ACTIVE=1 to the inner shell so its rc-file integration
     // knows when it's running under us. If we *already* see it set, that means
     // this cmdq was launched from inside another cmdq's shell — almost always
@@ -528,7 +593,20 @@ pub fn run(cfg: AppConfig) -> Result<()> {
              \n\
              (the `exec` replaces your shell, and the guard prevents recursion.)"
         );
-        return Ok(());
+        return Ok(0);
+    }
+
+    let shell = cfg
+        .shell
+        .clone()
+        .or_else(crate::shell_integration::current_shell)
+        .unwrap_or_else(|| "/bin/sh".into());
+    let queue_supported = crate::shell_integration::ShellKind::detect_from_path(&shell)
+        != crate::shell_integration::ShellKind::Sh;
+    if !queue_supported {
+        eprintln!(
+            "cmdq: {shell} has no queue hooks; using terminal passthrough. For automatic queueing, use --shell zsh, --shell bash, or --shell fish."
+        );
     }
 
     // Register handlers before creating any persistent session state. A
@@ -538,7 +616,11 @@ pub fn run(cfg: AppConfig) -> Result<()> {
 
     let session_cwd = std::env::current_dir().ok();
     let queue_path = queue::try_default_path()?;
-    let (mut queue, queue_load_warning) = Queue::load_or_default_with_warning(&queue_path);
+    let (mut queue, queue_load_warning) = if queue_supported {
+        Queue::load_or_default_with_warning(&queue_path)
+    } else {
+        (Queue::new(), None)
+    };
     if let Some(warning) = &queue_load_warning {
         eprintln!("cmdq: {warning}");
     }
@@ -548,8 +630,11 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         prepare_queue_for_startup(&mut queue, session_cwd.as_deref(), active_peer_count);
     let startup_status = startup_status.or(queue_load_warning);
     let queue_known_items = queue.item_snapshot();
-    let mut session_lease =
-        crate::session_lease::SessionLease::start(&queue_path, session_cwd.as_deref()).ok();
+    let mut session_lease = if queue_supported {
+        crate::session_lease::SessionLease::start(&queue_path, session_cwd.as_deref()).ok()
+    } else {
+        None
+    };
 
     let (cols, rows) = {
         let (c, r) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -557,9 +642,13 @@ pub fn run(cfg: AppConfig) -> Result<()> {
     };
     let (mut pty, io_pair) = ShellPty::spawn(cfg.shell.as_deref(), cols, rows)?;
 
-    let (pty_tx, pty_rx) = mpsc::channel::<Vec<u8>>();
+    // Backpressure keeps a noisy command from growing memory without bound.
+    let (pty_tx, pty_rx) = mpsc::sync_channel::<Vec<u8>>(32);
+    let (wake_tx, wake_rx) = output_wakeup_pair();
+    let wake_armed = Arc::new(AtomicBool::new(false));
     {
         let mut reader: Box<dyn Read + Send> = io_pair.reader;
+        let wake_armed = wake_armed.clone();
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -569,6 +658,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                         if pty_tx.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
+                        signal_output_wakeup(&wake_tx, &wake_armed);
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
@@ -579,7 +669,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
 
     let mut writer: Box<dyn Write + Send> = io_pair.writer;
 
-    let mut osc = Detector::new();
+    let mut osc = Detector::for_cmdq();
     let mut mode = mode_detect::Detector::new();
     let cleanup_state = Arc::new(Mutex::new(TerminalRestoreState {
         layout: PanelLayout::Hidden,
@@ -604,19 +694,18 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         session_lease_io.clone(),
     )
     .context("install signal cleanup")?;
-    let mut stdout = io::stdout();
+    let mut stdout = Terminal::new();
     // Bracketed paste lets us distinguish typed text from pasted text.
-    // Keyboard enhancement flags give us reliable Esc / modifier reporting.
+    // Save the outer keyboard mode with a neutral base. Children can negotiate
+    // their own keyboard protocol; requesting cmdq-only CSI-u flags here would
+    // make an ordinary shell receive encodings it never asked for.
     // We do NOT enter alt-screen and we do NOT enable mouse capture: that
     // would cost the user their terminal's native selection, scrollback,
     // hyperlinks, OSC 52 clipboard, and image protocols.
     let _ = execute!(stdout, EnableBracketedPaste);
     let _ = execute!(
         stdout,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-        )
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::empty())
     );
 
     let original_hook = std::panic::take_hook();
@@ -628,6 +717,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
 
     let has_startup_status = startup_status.is_some();
     let mut state = AppState {
+        queue_supported,
         queue,
         editor: LineEditor::new(),
         shell_state: ShellState::Unknown,
@@ -636,11 +726,13 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         child_alt_screen: false,
         child_mouse_capture: false,
         child_focus_events: false,
+        child_tty_input: false,
         force_queue: false,
         show_help: false,
         terminal_allows_panel: terminal_allows_panel(cols, rows),
         last_sigint_at: None,
         command_started_at: None,
+        command_tty_check_after: None,
         prompt_buffer: String::new(),
         prompt_cursor: 0,
         prompt_buffer_reliable: true,
@@ -649,6 +741,8 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         child_input_active: false,
         child_bracketed_paste: false,
         pending_quit_at: None,
+        pending_clear_at: None,
+        last_exit_code: None,
         last_esc_at: None,
         chain_seen: false,
         status: startup_status.unwrap_or_default(),
@@ -675,16 +769,59 @@ pub fn run(cfg: AppConfig) -> Result<()> {
     let mut shell_cursor = CursorTracker::new(term_cols, term_rows);
     let mut mode_pending = Vec::new();
     let mut mode_pending_since: Option<Instant> = None;
-    let mut last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
+    let mut last_paint = PaintClock::forced();
+    let mut paint_pending = false;
+    let mut output_generation: u64 = 0;
     let mut last_queue_sync = Instant::now();
     let mut last_session_lease_refresh = Instant::now();
     let mut deferred_panel_reflow_rows: Option<u16> = None;
+    #[cfg(unix)]
+    let mut terminal_input = crate::terminal_input::Reader::new((cols, rows));
+    #[cfg(unix)]
+    if let Some(wake_rx) = wake_rx {
+        terminal_input.set_output_wakeup(wake_rx, wake_armed.clone());
+    }
+    #[cfg(not(unix))]
+    drop((wake_rx, wake_armed));
+
+    // The shell starts wherever the terminal's cursor already is — usually
+    // mid-screen, right under the line that launched cmdq. Ask the terminal
+    // instead of assuming the bottom row, so the first panel reservation
+    // neither scrolls history away nor leaves a blank gap above the output.
+    #[cfg(unix)]
+    let initial_cursor = terminal_input
+        .query_cursor_position(&mut stdout, CURSOR_QUERY_TIMEOUT)
+        .ok()
+        .flatten();
+    #[cfg(not(unix))]
+    let initial_cursor = crossterm::cursor::position().ok();
+    if let Some((col, row)) = initial_cursor {
+        shell_cursor.set_position(col, row);
+    }
 
     let result = loop {
+        // Readline/ZLE briefly retain their raw mode while submitting a
+        // command. Allow that handoff to settle before treating it as a child
+        // requesting direct input. Recheck even when there is no output.
+        state.child_tty_input = state.tty_input_requested(&pty);
+        refresh_auto_passthrough_for_child_modes(
+            &mut state,
+            &mut stdout,
+            &mut layout,
+            term_rows,
+            term_cols,
+            &mut pty,
+            &cleanup_state,
+            &mut shell_cursor,
+            &mut last_paint,
+            None,
+        )?;
         // 1. Drain any PTY output, pass it straight through to the user's
         //    terminal, and feed the byte sniffers.
         let mut had_bytes = false;
-        loop {
+        // Give input, repainting, and child-exit checks a turn even when the
+        // producer continuously fills the channel (e.g. yes or a busy log).
+        for _ in 0..32 {
             match pty_rx.try_recv() {
                 Ok(bytes) => {
                     had_bytes = true;
@@ -888,8 +1025,9 @@ pub fn run(cfg: AppConfig) -> Result<()> {
             }
         }
         if had_bytes {
-            let _ = stdout.flush();
+            output_generation = output_generation.wrapping_add(1);
         }
+        let _ = stdout.flush();
 
         if !mode_pending.is_empty()
             && mode_pending_since
@@ -911,7 +1049,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
         state.tick_status();
         flush_pending_escape_if_due(&mut state, &mut writer);
 
-        if let Ok(Some(_)) = pty.try_wait() {
+        if let Some(status) = pty.try_wait().context("wait for shell")? {
             if !mode_pending.is_empty() {
                 flush_mode_pending(
                     &mut stdout,
@@ -936,7 +1074,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                 shell_cursor.position(),
             );
             sync_cursor_tracker_for_layout(&mut shell_cursor, layout, term_cols, term_rows);
-            break Ok(());
+            break Ok(status.exit_code());
         }
 
         // 2. Update panel layout to match desired state.
@@ -953,17 +1091,62 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                 shell_cursor.position(),
             )?;
             sync_cursor_tracker_for_layout(&mut shell_cursor, layout, term_cols, term_rows);
-            last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
+            last_paint.force();
         }
 
-        // 3. Read one input event (with a short timeout so the loop ticks).
+        // 3. Read one input event. PTY output wakes the poll through a pipe,
+        //    so idle iterations can sleep longer; keep the short timeout only
+        //    while a partial key sequence or a deferred repaint is pending.
+        #[cfg(unix)]
+        let input_pending = terminal_input.has_pending_input();
+        #[cfg(not(unix))]
+        let input_pending = false;
         let timeout = if had_bytes {
             Duration::from_millis(0)
-        } else {
+        } else if paint_pending || input_pending {
             POLL_INTERVAL
+        } else {
+            IDLE_POLL_INTERVAL
         };
-        if crossterm::event::poll(timeout).unwrap_or(false) {
-            let event = crossterm::event::read().context("event::read")?;
+        #[cfg(unix)]
+        let event = match terminal_input
+            .read(timeout)
+            .context("read terminal input")?
+        {
+            Some(crate::terminal_input::Input::Event(event)) => Some(event),
+            Some(crate::terminal_input::Input::Reply(bytes)) => {
+                writer.write_all(&bytes).context("forward terminal reply")?;
+                writer.flush()?;
+                None
+            }
+            None => None,
+        };
+        #[cfg(not(unix))]
+        let event = if crossterm::event::poll(timeout).context("poll terminal input")? {
+            Some(crossterm::event::read().context("event::read")?)
+        } else {
+            None
+        };
+        if let Some(event) = event {
+            // A reader can restore canonical mode while poll waits for the
+            // next key. Route against the current discipline, not the state
+            // sampled before the last output batch.
+            let direct_input = state.tty_input_requested(&pty);
+            if direct_input != state.child_tty_input {
+                state.child_tty_input = direct_input;
+                refresh_auto_passthrough_for_child_modes(
+                    &mut state,
+                    &mut stdout,
+                    &mut layout,
+                    term_rows,
+                    term_cols,
+                    &mut pty,
+                    &cleanup_state,
+                    &mut shell_cursor,
+                    &mut last_paint,
+                    None,
+                )?;
+            }
             match event {
                 CtEvent::Resize(cw, rh) => {
                     let old_cols = term_cols;
@@ -985,6 +1168,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                             editing_index: state.editor.editing_index,
                             status: &state.status,
                             pending_quit: state.pending_quit_active(),
+                            pending_clear: state.pending_clear_active(),
                             show_help: state.show_help,
                             max_queue_visible: MAX_QUEUE_VISIBLE,
                         };
@@ -1055,13 +1239,22 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                     )?;
                     resize_pty_for_layout(&mut pty, layout, term_cols, term_rows);
                     sync_cursor_tracker_for_layout(&mut shell_cursor, layout, term_cols, term_rows);
-                    last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
+                    last_paint.force();
                 }
                 CtEvent::Key(key) => {
                     if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
+                        #[cfg(unix)]
+                        if !state.editor_owns_input() && !state.show_help {
+                            writer.write_all(&terminal_input.event_bytes)?;
+                            writer.flush()?;
+                        }
                         continue;
                     }
-                    match handle_key(key, &mut state, &mut writer) {
+                    #[cfg(unix)]
+                    let original = Some(terminal_input.event_bytes.as_slice());
+                    #[cfg(not(unix))]
+                    let original = None;
+                    match handle_key_with_bytes(key, &mut state, &mut writer, original) {
                         KeyOutcome::Quit => {
                             transition_layout_recorded(
                                 &mut stdout,
@@ -1079,7 +1272,7 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                                 term_cols,
                                 term_rows,
                             );
-                            break Ok(());
+                            break Ok(0);
                         }
                         KeyOutcome::Continue => {}
                     }
@@ -1087,7 +1280,12 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                 CtEvent::Paste(text) => handle_paste(text, &mut state, &mut writer),
                 CtEvent::Mouse(mouse) => {
                     if state.child_mouse_capture || state.auto_passthrough {
+                        #[cfg(unix)]
+                        let bytes = terminal_input.event_bytes.clone();
+                        #[cfg(not(unix))]
                         let bytes = encode_mouse_event_for_pty(mouse);
+                        #[cfg(unix)]
+                        let _ = mouse;
                         if !bytes.is_empty() {
                             let _ = writer.write_all(&bytes);
                             let _ = writer.flush();
@@ -1109,18 +1307,22 @@ pub fn run(cfg: AppConfig) -> Result<()> {
             }
         }
 
-        save_queue_if_dirty(&mut state, &queue_path);
-        sync_queue_from_disk_if_due(&mut state, &queue_path, &mut last_queue_sync);
+        if state.queue_supported {
+            save_queue_if_dirty(&mut state, &queue_path);
+            sync_queue_from_disk_if_due(&mut state, &queue_path, &mut last_queue_sync);
+        }
         refresh_session_lease_if_due(
             &mut session_lease,
             &mut last_session_lease_refresh,
             &session_lease_io,
         );
 
-        // 4. Repaint the panel if it should be visible.
-        if let PanelLayout::Reserved { height } = layout
-            && last_paint.elapsed() >= PANEL_REPAINT_INTERVAL
-        {
+        // 4. Repaint the panel when what it shows has changed. Output counts
+        //    as a change: it leaves the terminal cursor away from the panel's
+        //    input line. Rate-limited so a flood of output cannot turn into
+        //    a flood of repaints.
+        paint_pending = false;
+        if let PanelLayout::Reserved { height } = layout {
             let view = PanelState {
                 queue: &state.queue,
                 running: matches!(state.shell_state, ShellState::Running),
@@ -1133,25 +1335,192 @@ pub fn run(cfg: AppConfig) -> Result<()> {
                 editing_index: state.editor.editing_index,
                 status: &state.status,
                 pending_quit: state.pending_quit_active(),
+                pending_clear: state.pending_clear_active(),
                 show_help: state.show_help,
                 max_queue_visible: MAX_QUEUE_VISIBLE,
             };
-            panel::paint(
-                &mut stdout,
+            let cursor_in_input = state.editor_owns_input();
+            let key = panel_render_key(
                 &view,
                 height,
                 term_rows,
                 term_cols,
-                state.editor_owns_input(),
-                shell_cursor.position(),
-            )?;
-            last_paint = Instant::now();
+                cursor_in_input,
+                output_generation,
+            );
+            if last_paint.key != Some(key) {
+                if last_paint.at.elapsed() >= PANEL_MIN_REPAINT_INTERVAL {
+                    panel::paint(
+                        &mut stdout,
+                        &view,
+                        height,
+                        term_rows,
+                        term_cols,
+                        cursor_in_input,
+                        shell_cursor.position(),
+                    )?;
+                    last_paint.painted(key);
+                } else {
+                    paint_pending = true;
+                }
+            }
         }
     };
 
     save_queue_if_dirty(&mut state, &queue_path);
     let _ = pty.kill();
     result
+}
+
+/// Buffered stdout. Shell output is forwarded chunk by chunk, and the line
+/// buffering of `io::Stdout` turns every chunk with a newline into its own
+/// write syscall; batching them per loop iteration is a large part of the
+/// wrapper's cost under heavy output. The main loop flushes every iteration.
+pub struct Terminal(Option<io::BufWriter<io::Stdout>>);
+
+impl Terminal {
+    fn new() -> Self {
+        Self(Some(io::BufWriter::with_capacity(64 * 1024, io::stdout())))
+    }
+
+    fn inner(&mut self) -> &mut io::BufWriter<io::Stdout> {
+        self.0
+            .as_mut()
+            .expect("terminal writer is only taken on drop")
+    }
+}
+
+impl Write for Terminal {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner().write(buf)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.inner().write_all(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner().flush()
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        if let Some(writer) = self.0.take() {
+            if std::thread::panicking() {
+                // The panic hook has already restored the terminal; flushing
+                // stale panel bytes on top of that would only corrupt it.
+                let _ = writer.into_parts();
+            } else {
+                drop(writer);
+            }
+        }
+    }
+}
+
+/// When the panel was last painted and what it showed, so idle iterations
+/// don't rewrite identical rows (and blink the cursor) every few dozen ms.
+struct PaintClock {
+    at: Instant,
+    key: Option<u64>,
+}
+
+impl PaintClock {
+    fn forced() -> Self {
+        Self {
+            at: Instant::now() - PANEL_MIN_REPAINT_INTERVAL,
+            key: None,
+        }
+    }
+
+    /// Invalidate the last paint (layout changed underneath the panel).
+    fn force(&mut self) {
+        *self = Self::forced();
+    }
+
+    fn painted(&mut self, key: u64) {
+        self.at = Instant::now();
+        self.key = Some(key);
+    }
+}
+
+/// Everything `panel::paint` reads, folded into one value. Output is folded
+/// in through `output_generation` because writing shell output moves the
+/// terminal cursor away from wherever the panel last parked it.
+fn panel_render_key(
+    view: &PanelState<'_>,
+    height: u16,
+    term_rows: u16,
+    term_cols: u16,
+    cursor_in_input: bool,
+    output_generation: u64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    view.queue.len().hash(&mut h);
+    for item in view.queue.items() {
+        item.id.hash(&mut h);
+        item.conditional.hash(&mut h);
+        item.command.hash(&mut h);
+    }
+    view.queue.paused.hash(&mut h);
+    (
+        view.running,
+        view.force_queue,
+        view.passthrough_to_child,
+        view.child_input_prompt,
+    )
+        .hash(&mut h);
+    view.input_buffer.hash(&mut h);
+    view.input_cursor.hash(&mut h);
+    view.editing_index.hash(&mut h);
+    view.status.hash(&mut h);
+    (view.pending_quit, view.pending_clear, view.show_help).hash(&mut h);
+    (
+        height,
+        term_rows,
+        term_cols,
+        cursor_in_input,
+        output_generation,
+    )
+        .hash(&mut h);
+    h.finish()
+}
+
+#[cfg(unix)]
+type OutputWakeup = std::os::unix::net::UnixStream;
+#[cfg(not(unix))]
+type OutputWakeup = ();
+
+/// A non-blocking socket pair the PTY reader thread pokes after every chunk,
+/// so the main loop wakes immediately instead of at its next poll timeout.
+#[cfg(unix)]
+fn output_wakeup_pair() -> (Option<OutputWakeup>, Option<OutputWakeup>) {
+    match std::os::unix::net::UnixStream::pair() {
+        Ok((tx, rx)) if tx.set_nonblocking(true).is_ok() && rx.set_nonblocking(true).is_ok() => {
+            (Some(tx), Some(rx))
+        }
+        _ => (None, None),
+    }
+}
+#[cfg(not(unix))]
+fn output_wakeup_pair() -> (Option<OutputWakeup>, Option<OutputWakeup>) {
+    (None, None)
+}
+
+/// One wakeup per main-loop sleep: `armed` stays set until the loop drains
+/// the socket, so a burst of small PTY reads costs one syscall, not one each.
+fn signal_output_wakeup(tx: &Option<OutputWakeup>, armed: &AtomicBool) {
+    #[cfg(unix)]
+    if let Some(tx) = tx
+        && !armed.swap(true, Ordering::AcqRel)
+    {
+        // A full socket buffer means a wakeup is already pending.
+        let _ = (&*tx).write(&[1u8]);
+    }
+    #[cfg(not(unix))]
+    let _ = (tx, armed);
 }
 
 struct CleanupGuard<F: FnOnce()> {
@@ -1241,6 +1610,8 @@ fn prepare_queue_for_startup(
     let local_pause = !queue.paused;
     queue.paused = true;
     let noun = if restored == 1 { "command" } else { "commands" };
+    // Keep the actions first and terse: at 80 columns the header has room
+    // for roughly 70 characters, and the tail is what gets clipped.
     let peer_note = active_peer_note(active_peer_count);
     if let Some(current) = session_cwd
         && let Some(warning) = resume_cwd_warning_for_queue(queue, current)
@@ -1248,7 +1619,7 @@ fn prepare_queue_for_startup(
         let origins = queue.mismatched_origins(current);
         return (
             Some(format!(
-                "restored {restored} queued {noun} from {}{peer_note} — Ctrl-X to confirm, Ctrl-K to clear",
+                "restored {restored} {noun} — ^X resume, ^K clear · saved in {}{peer_note}",
                 compact_origin_summary(&origins)
             )),
             false,
@@ -1259,7 +1630,7 @@ fn prepare_queue_for_startup(
 
     (
         Some(format!(
-            "restored {restored} queued {noun}{peer_note} — Ctrl-X to resume, Ctrl-K to clear"
+            "restored {restored} {noun} — ^X resume, ^K clear{peer_note}"
         )),
         false,
         None,
@@ -1270,8 +1641,8 @@ fn prepare_queue_for_startup(
 fn active_peer_note(count: usize) -> String {
     match count {
         0 => String::new(),
-        1 => " (another cmdq session is active)".to_string(),
-        n => format!(" ({n} other cmdq sessions are active)"),
+        1 => " · another session active".to_string(),
+        n => format!(" · {n} other sessions active"),
     }
 }
 
@@ -1555,6 +1926,7 @@ fn desired_layout(state: &AppState, term_rows: u16) -> PanelLayout {
         editing_index: state.editor.editing_index,
         status: &state.status,
         pending_quit: state.pending_quit_active(),
+        pending_clear: state.pending_clear_active(),
         show_help: state.show_help,
         max_queue_visible: MAX_QUEUE_VISIBLE,
     };
@@ -1587,7 +1959,7 @@ fn record_alt_screen_state(state: &Arc<Mutex<TerminalRestoreState>>, alt_screen:
 
 #[allow(clippy::too_many_arguments)]
 fn transition_layout_recorded(
-    out: &mut io::Stdout,
+    out: &mut Terminal,
     current: &mut PanelLayout,
     desired: PanelLayout,
     term_rows: u16,
@@ -1612,7 +1984,7 @@ fn transition_layout_recorded(
 /// Move from `*current` to `desired`, applying scrolling-region and PTY-size
 /// changes so the inner shell sees a sensible window.
 fn transition_layout(
-    out: &mut io::Stdout,
+    out: &mut Terminal,
     current: &mut PanelLayout,
     desired: PanelLayout,
     term_rows: u16,
@@ -1679,7 +2051,7 @@ fn sync_cursor_tracker_for_layout(
 }
 
 fn restore_shell_cursor_if_reserved(
-    out: &mut io::Stdout,
+    out: &mut Terminal,
     layout: PanelLayout,
     cursor: &CursorTracker,
 ) -> Result<()> {
@@ -1691,7 +2063,7 @@ fn restore_shell_cursor_if_reserved(
 }
 
 fn clear_reflowed_panel_after_shrink(
-    out: &mut io::Stdout,
+    out: &mut Terminal,
     panel_rows: u16,
     term_cols: u16,
     term_rows: u16,
@@ -1718,7 +2090,7 @@ fn clear_reflowed_panel_after_shrink(
 }
 
 fn clear_reappeared_panel_rows(
-    out: &mut io::Stdout,
+    out: &mut Terminal,
     panel_rows: u16,
     old_rows: u16,
     new_rows: u16,
@@ -1737,7 +2109,7 @@ fn clear_reappeared_panel_rows(
 }
 
 fn flush_mode_pending(
-    out: &mut io::Stdout,
+    out: &mut Terminal,
     layout: PanelLayout,
     cursor: &mut CursorTracker,
     state: &mut AppState,
@@ -1757,16 +2129,19 @@ fn flush_mode_pending(
 fn handle_osc_event(
     event: osc133::Event,
     state: &mut AppState,
-    stdout: &mut io::Stdout,
+    stdout: &mut Terminal,
     layout: &mut PanelLayout,
     term_rows: u16,
     term_cols: u16,
     pty: &mut ShellPty,
     cleanup_state: &Arc<Mutex<TerminalRestoreState>>,
     shell_cursor: &mut CursorTracker,
-    last_paint: &mut Instant,
+    last_paint: &mut PaintClock,
     writer: &mut Box<dyn Write + Send>,
 ) -> Result<()> {
+    if !state.queue_supported {
+        return Ok(());
+    }
     match event {
         osc133::Event::PromptStart | osc133::Event::PromptEnd => {
             state.shell_state = ShellState::AtPrompt;
@@ -1775,10 +2150,14 @@ fn handle_osc_event(
         }
         osc133::Event::CommandStart => {
             mark_command_started(state);
+            // The real preexec hook has handed off from the shell editor;
+            // unlike optimistic submission, this needs no settling delay.
+            state.command_tty_check_after = Some(Instant::now());
         }
         osc133::Event::CommandEnd { exit_code } => {
             state.shell_state = ShellState::AtPrompt;
             state.command_started_at = None;
+            state.last_exit_code = exit_code;
             reset_prompt_tracking(state);
             state.prompt_continuation_active = false;
             state.running_output_tail.clear();
@@ -1796,9 +2175,17 @@ fn handle_osc_event(
                     shell_cursor.position(),
                 )?;
                 sync_cursor_tracker_for_layout(shell_cursor, *layout, term_cols, term_rows);
-                *last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
+                last_paint.force();
             }
-            handle_command_end(state, exit_code, writer);
+            let dispatched = handle_command_end(state, exit_code, writer);
+            if !dispatched
+                && !state.queue.paused
+                && !state.force_queue
+                && state.editor.editing_index.is_none()
+                && !state.editor.buffer.is_empty()
+            {
+                state.set_status("draft kept — Enter runs it now, Esc discards it");
+            }
         }
         osc133::Event::CurrentDir(path) => {
             state.shell_cwd = Some(path);
@@ -1809,7 +2196,7 @@ fn handle_osc_event(
 
 fn restore_child_terminal_modes_after_command(
     state: &mut AppState,
-    stdout: &mut io::Stdout,
+    stdout: &mut Terminal,
     cleanup_state: &Arc<Mutex<TerminalRestoreState>>,
 ) -> Result<()> {
     if state.child_alt_screen {
@@ -1831,21 +2218,25 @@ fn restore_child_terminal_modes_after_command(
     state.child_alt_screen = false;
     state.child_mouse_capture = false;
     state.child_focus_events = false;
+    state.child_tty_input = false;
     state.auto_passthrough = false;
     record_alt_screen_state(cleanup_state, false);
     Ok(())
 }
 
 fn update_child_input_detection(state: &mut AppState, bytes: &[u8]) {
+    // The tail only matters while a command runs; it is cleared on every
+    // command start, so prompt-time output never needs to be scanned.
+    if !matches!(state.shell_state, ShellState::Running) {
+        return;
+    }
     let saw_line_break = bytes.iter().any(|b| matches!(b, b'\r' | b'\n'));
     state.running_output_tail.feed(bytes);
-    if state.child_input_active
-        && saw_line_break
-        && !state.running_output_tail.looks_like_input_prompt()
-    {
+    let looks_like_prompt = state.running_output_tail.looks_like_input_prompt();
+    if state.child_input_active && saw_line_break && !looks_like_prompt {
         state.child_input_active = false;
     }
-    if state.running_output_tail.looks_like_input_prompt()
+    if looks_like_prompt
         && matches!(state.shell_state, ShellState::Running)
         && !state.force_queue
         && !state.effective_passthrough()
@@ -1857,18 +2248,24 @@ fn update_child_input_detection(state: &mut AppState, bytes: &[u8]) {
 #[allow(clippy::too_many_arguments)]
 fn refresh_auto_passthrough_for_child_modes(
     state: &mut AppState,
-    stdout: &mut io::Stdout,
+    stdout: &mut Terminal,
     layout: &mut PanelLayout,
     term_rows: u16,
     term_cols: u16,
     pty: &mut ShellPty,
     cleanup_state: &Arc<Mutex<TerminalRestoreState>>,
     shell_cursor: &mut CursorTracker,
-    last_paint: &mut Instant,
+    last_paint: &mut PaintClock,
     status: Option<&'static str>,
 ) -> Result<()> {
     let was_passthrough = state.auto_passthrough;
-    state.auto_passthrough = state.child_alt_screen || state.child_mouse_capture;
+    state.auto_passthrough = !state.queue_supported
+        || state.child_alt_screen
+        || state.child_mouse_capture
+        || state.child_tty_input;
+    if state.auto_passthrough && !was_passthrough {
+        state.show_help = false;
+    }
     record_alt_screen_state(cleanup_state, state.child_alt_screen);
 
     if let Some(status) = status
@@ -1893,7 +2290,7 @@ fn refresh_auto_passthrough_for_child_modes(
             shell_cursor.position(),
         )?;
         sync_cursor_tracker_for_layout(shell_cursor, *layout, term_cols, term_rows);
-        *last_paint = Instant::now() - PANEL_REPAINT_INTERVAL;
+        last_paint.force();
     }
     Ok(())
 }
@@ -1901,6 +2298,7 @@ fn refresh_auto_passthrough_for_child_modes(
 fn mark_command_started(state: &mut AppState) {
     state.shell_state = ShellState::Running;
     state.command_started_at = Some(Instant::now());
+    state.command_tty_check_after = Some(Instant::now() + Duration::from_millis(100));
     reset_prompt_tracking(state);
     state.prompt_continuation_active = false;
     state.running_output_tail.clear();
@@ -1909,6 +2307,7 @@ fn mark_command_started(state: &mut AppState) {
     state.child_alt_screen = false;
     state.child_mouse_capture = false;
     state.child_focus_events = false;
+    state.child_tty_input = false;
     state.auto_passthrough = false;
 }
 
@@ -1924,6 +2323,7 @@ fn handle_command_end(
     state.child_alt_screen = false;
     state.child_mouse_capture = false;
     state.child_focus_events = false;
+    state.child_tty_input = false;
     state.auto_passthrough = false;
     let recent_sigint = state
         .last_sigint_at
@@ -2117,10 +2517,20 @@ enum KeyOutcome {
     Quit,
 }
 
+#[cfg(test)]
 fn handle_key(
     key: KeyEvent,
     state: &mut AppState,
     writer: &mut Box<dyn Write + Send>,
+) -> KeyOutcome {
+    handle_key_with_bytes(key, state, writer, None)
+}
+
+fn handle_key_with_bytes(
+    key: KeyEvent,
+    state: &mut AppState,
+    writer: &mut Box<dyn Write + Send>,
+    original: Option<&[u8]>,
 ) -> KeyOutcome {
     use crossterm::event::KeyCode;
 
@@ -2150,6 +2560,11 @@ fn handle_key(
 
     if state.resume_cwd_confirmation_started_at.is_some() && !is_ctrl_x(&key) {
         state.resume_cwd_confirmation_started_at = None;
+    }
+
+    // Anything but a second Ctrl-K withdraws a pending queue clear.
+    if state.pending_clear_at.is_some() && !is_ctrl_k(&key) {
+        withdraw_pending_clear(state);
     }
 
     if matches!(key.code, KeyCode::F(1)) && !state.effective_passthrough() {
@@ -2304,10 +2719,16 @@ fn handle_key(
 
     if !editor_owns {
         let was_child_input = state.child_input_prompt_active();
-        let was_any_key_prompt =
-            was_child_input && state.running_output_tail.looks_like_any_key_prompt();
+        let was_any_key_prompt = matches!(state.shell_state, ShellState::Running)
+            && !state.child_alt_screen
+            && !state.child_mouse_capture
+            && state.running_output_tail.looks_like_any_key_prompt();
         let submitted_prompt_line = update_prompt_buffer_for_forwarded_key(&key, state);
-        let bytes = encode_key_for_pty(&key);
+        // Preserve application-cursor keys (SS3), modified function keys,
+        // legacy encodings, and protocols negotiated by the child itself.
+        let bytes = original
+            .map(<[u8]>::to_vec)
+            .unwrap_or_else(|| encode_key_for_pty(&key));
         if bytes.contains(&ETX) {
             state.last_sigint_at = Some(Instant::now());
         }
@@ -2315,7 +2736,7 @@ fn handle_key(
             let _ = writer.write_all(&bytes);
             let _ = writer.flush();
         }
-        if was_child_input
+        if (was_child_input || was_any_key_prompt)
             && (matches!(key.code, KeyCode::Enter)
                 || bytes.contains(&ETX)
                 || (was_any_key_prompt && !bytes.is_empty()))
@@ -2372,6 +2793,16 @@ fn handle_key(
             state.queue.push_with_origin(&command, conditional, origin);
             state.queue_dirty = true;
             state.set_status(format!("added: {}", truncate_for_status(&command)));
+            // A draft kept the panel open after its command finished. The
+            // shell is idle and nothing holds the queue, so run it now rather
+            // than parking it until some unrelated command ends.
+            if matches!(state.shell_state, ShellState::AtPrompt)
+                && !state.force_queue
+                && !state.queue.paused
+            {
+                let prev_exit = state.last_exit_code;
+                dispatch_next_eligible(state, prev_exit, writer);
+            }
         }
         InputAction::CommitEdit {
             index,
@@ -2513,6 +2944,21 @@ fn toggle_queue_pause(state: &mut AppState, writer: &mut Box<dyn Write + Send>) 
 }
 
 fn clear_queue(state: &mut AppState) {
+    if state.queue.is_empty() {
+        state.pending_clear_at = None;
+        state.set_status("queue is already empty");
+        return;
+    }
+    if !state.pending_clear_active() {
+        state.pending_clear_at = Some(Instant::now());
+        let n = state.queue.len();
+        let noun = if n == 1 { "command" } else { "commands" };
+        state.set_status(format!(
+            "clear {n} queued {noun}? press ^K again to confirm"
+        ));
+        return;
+    }
+    state.pending_clear_at = None;
     state.queue.clear();
     state.queue.paused = false;
     state.restored_queue_paused_locally = false;
@@ -2547,12 +2993,31 @@ fn is_ctrl_x(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('x' | 'X'))
 }
 
+/// Drop a pending Ctrl-K confirmation, and the header prompt that asked for
+/// it, so the panel doesn't keep asking after the user moved on.
+fn withdraw_pending_clear(state: &mut AppState) {
+    state.pending_clear_at = None;
+    if state.status.starts_with("clear ") && state.status.contains("^K again") {
+        state.status.clear();
+        state.status_set_at = None;
+    }
+}
+
+fn is_ctrl_k(key: &KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('k' | 'K'))
+}
+
 fn handle_paste(text: String, state: &mut AppState, writer: &mut Box<dyn Write + Send>) {
     if state.show_help {
         state.show_help = false;
     }
     if state.pending_quit_at.is_some() {
         state.pending_quit_at = None;
+    }
+    if state.pending_clear_at.is_some() {
+        withdraw_pending_clear(state);
     }
     if state.resume_cwd_confirmation_started_at.is_some() {
         state.resume_cwd_confirmation_started_at = None;
@@ -3156,6 +3621,7 @@ fn contains_heredoc_operator(line: &str) -> bool {
     false
 }
 
+#[cfg(any(not(unix), test))]
 fn encode_mouse_event_for_pty(mouse: MouseEvent) -> Vec<u8> {
     let (mut cb, final_byte) = sgr_mouse_code(mouse.kind);
     if mouse.modifiers.contains(KeyModifiers::SHIFT) {
@@ -3177,6 +3643,7 @@ fn encode_mouse_event_for_pty(mouse: MouseEvent) -> Vec<u8> {
     .into_bytes()
 }
 
+#[cfg(any(not(unix), test))]
 fn sgr_mouse_code(kind: MouseEventKind) -> (u16, char) {
     let button_code = |button| match button {
         MouseButton::Left => 0,
@@ -3212,7 +3679,7 @@ fn encode_key_for_pty(key: &KeyEvent) -> Vec<u8> {
                 let lc = c.to_ascii_lowercase();
                 let code = match lc {
                     'a'..='z' => Some((lc as u8) - b'a' + 1),
-                    '@' => Some(0),
+                    '@' | ' ' => Some(0),
                     '[' | '\\' | ']' | '^' | '_' => Some((lc as u8) - 0x40),
                     _ => None,
                 };
@@ -3379,6 +3846,7 @@ pub(crate) mod tests {
 
     fn make_state() -> AppState {
         AppState {
+            queue_supported: true,
             queue: Queue::new(),
             editor: LineEditor::new(),
             shell_state: ShellState::Running,
@@ -3387,11 +3855,13 @@ pub(crate) mod tests {
             child_alt_screen: false,
             child_mouse_capture: false,
             child_focus_events: false,
+            child_tty_input: false,
             force_queue: false,
             show_help: false,
             terminal_allows_panel: true,
             last_sigint_at: None,
             command_started_at: None,
+            command_tty_check_after: None,
             prompt_buffer: String::new(),
             prompt_cursor: 0,
             prompt_buffer_reliable: true,
@@ -3400,6 +3870,8 @@ pub(crate) mod tests {
             child_input_active: false,
             child_bracketed_paste: false,
             pending_quit_at: None,
+            pending_clear_at: None,
+            last_exit_code: None,
             last_esc_at: None,
             chain_seen: false,
             status: String::new(),
@@ -4900,11 +5372,13 @@ pub(crate) mod tests {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
 
-        let _ = handle_key(
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-            &mut s,
-            &mut w,
-        );
+        for _ in 0..2 {
+            let _ = handle_key(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+                &mut s,
+                &mut w,
+            );
+        }
 
         assert!(s.queue.is_empty());
         assert!(!s.queue.paused);
@@ -5037,11 +5511,13 @@ pub(crate) mod tests {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
 
-        let _ = handle_key(
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-            &mut s,
-            &mut w,
-        );
+        for _ in 0..2 {
+            let _ = handle_key(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+                &mut s,
+                &mut w,
+            );
+        }
 
         assert!(s.queue.is_empty());
         assert!(!s.queue.paused);
@@ -5238,7 +5714,7 @@ pub(crate) mod tests {
             "startup pause is session-local so a second window does not pause another live queue"
         );
         assert!(local_pause);
-        assert!(status.unwrap().contains("restored 1 queued command"));
+        assert!(status.unwrap().contains("restored 1 command"));
         assert!(warning.is_none());
 
         let mut s = make_state();
@@ -5261,7 +5737,7 @@ pub(crate) mod tests {
         assert!(!dirty);
         assert!(local_pause);
         assert!(warning.is_none());
-        assert!(status.unwrap().contains("another cmdq session is active"));
+        assert!(status.unwrap().contains("another session active"));
     }
 
     #[test]
@@ -5323,7 +5799,7 @@ pub(crate) mod tests {
         assert!(q.paused);
         assert!(!dirty);
         assert!(local_pause);
-        assert!(status.unwrap().contains("from /tmp/original"));
+        assert!(status.unwrap().contains("saved in /tmp/original"));
         assert!(warning.unwrap().contains("press Ctrl-X again"));
 
         let mut state = make_state();
@@ -5982,5 +6458,215 @@ pub(crate) mod tests {
 
         assert_eq!(s.editor.buffer, "cat <<'EOF'\nhello\nEOF");
         assert!(buf.lock().unwrap().is_empty(), "PTY must not see paste");
+    }
+    #[test]
+    fn ctrl_k_requires_a_second_press_before_clearing_the_queue() {
+        use crossterm::event::KeyCode;
+
+        let mut s = make_state();
+        s.command_started_at = Some(Instant::now() - QUEUE_PANEL_DELAY);
+        s.queue.push("echo a", false);
+        s.queue.push("echo b", false);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        let ctrl_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+
+        let _ = handle_key(ctrl_k, &mut s, &mut w);
+        assert_eq!(s.queue.len(), 2, "first Ctrl-K must only ask");
+        assert!(s.pending_clear_active());
+        assert!(s.status.contains("again"), "status: {}", s.status);
+
+        // Any other key withdraws the confirmation.
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        assert!(!s.pending_clear_active());
+        assert!(
+            !s.status.contains("again"),
+            "withdrawn prompt must go: {}",
+            s.status
+        );
+        let _ = handle_key(ctrl_k, &mut s, &mut w);
+        assert_eq!(
+            s.queue.len(),
+            2,
+            "a withdrawn confirmation must not carry over"
+        );
+
+        let _ = handle_key(ctrl_k, &mut s, &mut w);
+        assert!(s.queue.is_empty());
+        assert!(!s.pending_clear_active());
+        assert!(s.status.contains("queue cleared"));
+        assert!(
+            buf.lock().unwrap().is_empty(),
+            "Ctrl-K must not reach the child"
+        );
+    }
+
+    #[test]
+    fn ctrl_k_on_empty_queue_does_not_arm_a_confirmation() {
+        use crossterm::event::KeyCode;
+
+        let mut s = make_state();
+        s.command_started_at = Some(Instant::now() - QUEUE_PANEL_DELAY);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &mut s,
+            &mut w,
+        );
+
+        assert!(!s.pending_clear_active());
+        assert!(s.status.contains("already empty"), "status: {}", s.status);
+    }
+
+    #[test]
+    fn pending_draft_keeps_panel_open_and_enter_runs_it_at_prompt() {
+        use crossterm::event::KeyCode;
+
+        let mut s = make_state();
+        s.command_started_at = Some(Instant::now() - QUEUE_PANEL_DELAY);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        for c in "echo draft".chars() {
+            let _ = handle_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut s,
+                &mut w,
+            );
+        }
+        assert_eq!(s.editor.buffer, "echo draft");
+
+        // The running command finishes before Enter.
+        s.shell_state = ShellState::AtPrompt;
+        s.command_started_at = None;
+        s.last_exit_code = Some(0);
+        assert!(
+            s.panel_should_be_visible(),
+            "draft must keep the panel open"
+        );
+        assert!(s.editor_owns_input(), "keys must keep going to the draft");
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+
+        assert!(
+            s.queue.is_empty(),
+            "idle shell should run the draft immediately"
+        );
+        assert_eq!(&*buf.lock().unwrap(), b"echo draft\n");
+        assert!(s.editor.buffer.is_empty());
+        assert!(!s.panel_should_be_visible());
+    }
+
+    #[test]
+    fn esc_discards_pending_draft_and_releases_panel() {
+        use crossterm::event::KeyCode;
+
+        let mut s = make_state();
+        s.shell_state = ShellState::AtPrompt;
+        s.editor.insert_str("echo draft");
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        assert!(s.panel_should_be_visible());
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+
+        assert!(s.editor.buffer.is_empty());
+        assert!(!s.panel_should_be_visible());
+        assert!(
+            buf.lock().unwrap().is_empty(),
+            "Esc must not leak to the shell"
+        );
+    }
+
+    #[test]
+    fn enter_at_prompt_does_not_dispatch_into_a_paused_or_forced_queue() {
+        use crossterm::event::KeyCode;
+
+        for (paused, force) in [(true, false), (false, true)] {
+            let mut s = make_state();
+            s.shell_state = ShellState::AtPrompt;
+            s.queue.paused = paused;
+            s.force_queue = force;
+            if paused {
+                s.queue.push("echo earlier", false);
+            }
+            s.editor.insert_str("echo later");
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+
+            let _ = handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut s,
+                &mut w,
+            );
+
+            assert!(
+                buf.lock().unwrap().is_empty(),
+                "paused={paused} force={force}"
+            );
+            assert!(s.queue.items().iter().any(|it| it.command == "echo later"));
+        }
+    }
+
+    #[test]
+    fn restore_notice_leads_with_actions() {
+        let mut q = Queue::new();
+        q.push("echo a", false);
+        let (status, ..) = prepare_queue_for_startup(&mut q, Some(Path::new("/tmp/cmdq-test")), 1);
+        let status = status.unwrap();
+        let actions = status.find("^X").unwrap();
+        let peer = status.find("another session active").unwrap();
+        assert!(
+            actions < peer,
+            "peer note must not push the actions off-screen: {status}"
+        );
+    }
+    /// Per-byte cost of the output pipeline, independent of any terminal:
+    /// `cargo test --release --lib output_pipeline_microbench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn output_pipeline_microbench() {
+        let line = b"the quick brown fox jumps over the lazy dog 0123456789 \x1b[32mok\x1b[0m\r\n";
+        let mut chunk = Vec::new();
+        while chunk.len() < 8192 {
+            chunk.extend_from_slice(line);
+        }
+        let total_mb = 64usize;
+        let chunks = total_mb * 1024 * 1024 / chunk.len();
+
+        let mut osc = Detector::for_cmdq();
+        let mut mode = mode_detect::Detector::new();
+        let mut cursor = CursorTracker::new(120, 40);
+        let mut state = make_state();
+        state.shell_state = ShellState::Running;
+
+        let started = Instant::now();
+        for _ in 0..chunks {
+            let _ = osc.feed_with_offsets(&chunk);
+            let _ = mode.feed_with_offsets(&chunk);
+            cursor.feed(&chunk);
+            update_child_input_detection(&mut state, &chunk);
+        }
+        let elapsed = started.elapsed();
+        let mb = (chunks * chunk.len()) as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "output pipeline: {mb:.0} MiB in {:.3}s = {:.0} MiB/s ({:.1} ns/byte)",
+            elapsed.as_secs_f64(),
+            mb / elapsed.as_secs_f64(),
+            elapsed.as_nanos() as f64 / (mb * 1024.0 * 1024.0)
+        );
     }
 }

@@ -2,8 +2,8 @@
 # Adds prompt boundary markers so cmdq can detect when the shell is at a prompt
 # vs. running a command.
 
-if [[ -n "$CMDQ_ACTIVE" ]] && [[ -z "$CMDQ_INTEGRATION_LOADED" ]]; then
-    CMDQ_INTEGRATION_LOADED=1
+if [[ -n "$CMDQ_ACTIVE" ]] && [[ "$CMDQ_INTEGRATION_LOADED" != 2 ]]; then
+    CMDQ_INTEGRATION_LOADED=2
 
     read -r -d '' _CMDQ_INSTALL_DEBUG_TRAP <<'CMDQ_DEBUG_TRAP' || true
 if [[ -z "$_CMDQ_DEBUG_TRAP_INSTALLED" ]]; then
@@ -39,10 +39,10 @@ CMDQ_DEBUG_TRAP
         local exit=${1:-$?}
         _cmdq_emit_cwd
         if [[ -n "$_CMDQ_IN_CMD" ]]; then
-            printf '\e]133;D;%s\a' "$exit"
+            printf '\e]133;D;%s;cmdq=1\a' "$exit"
             unset _CMDQ_IN_CMD
         fi
-        printf '\e]133;A\a'
+        printf '\e]133;A;cmdq=1\a'
     }
 
     _cmdq_prompt_start() {
@@ -82,7 +82,7 @@ CMDQ_DEBUG_TRAP
               && "$BASH_COMMAND" != "_cmdq_emit_cwd" \
               && -z "$_CMDQ_IN_CMD" ]]; then
             _CMDQ_IN_CMD=1
-            printf '\e]133;C\a'
+            printf '\e]133;C;cmdq=1\a'
         fi
     }
 

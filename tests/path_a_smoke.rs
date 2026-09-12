@@ -175,7 +175,7 @@ fn does_not_enter_alt_screen() {
 /// startup. They are what makes the editor work cleanly without making us a
 /// terminal emulator.
 #[test]
-fn enables_bracketed_paste_and_keyboard_enhancement() {
+fn enables_bracketed_paste_and_preserves_outer_keyboard_mode() {
     let Some(h) = Harness::spawn("setup") else {
         return;
     };
@@ -187,10 +187,10 @@ fn enables_bracketed_paste_and_keyboard_enhancement() {
         "bracketed-paste enable not seen; output: {:?}",
         String::from_utf8_lossy(&accum)
     );
-    // Kitty keyboard protocol push: `CSI > <flags> u`. Crossterm uses flags
-    // 1 (DISAMBIGUATE) | 4 (REPORT_ALTERNATE_KEYS) = 5.
+    // Save the outer mode with a neutral base. The child, rather than cmdq,
+    // negotiates any enhanced keyboard encoding it wants to receive.
     assert!(
-        contains(&accum, b"\x1b[>5u") || contains(&accum, b"\x1b[>1u"),
+        contains(&accum, b"\x1b[>0u"),
         "keyboard-enhancement push not seen; output: {:?}",
         String::from_utf8_lossy(&accum)
     );

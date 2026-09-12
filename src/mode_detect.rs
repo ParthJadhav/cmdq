@@ -95,8 +95,18 @@ impl Detector {
         if !matches!(self.state, State::Normal) {
             self.sequence_start = None;
         }
-        for (idx, &b) in bytes.iter().enumerate() {
-            self.step(idx, b, &mut out);
+        let mut idx = 0;
+        while idx < bytes.len() {
+            if matches!(self.state, State::Normal) {
+                // Plain text is the common case: jump straight to the next
+                // escape instead of stepping the state machine per byte.
+                match bytes[idx..].iter().position(|&b| b == 0x1B) {
+                    Some(offset) => idx += offset,
+                    None => break,
+                }
+            }
+            self.step(idx, bytes[idx], &mut out);
+            idx += 1;
         }
         out
     }

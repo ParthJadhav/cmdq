@@ -227,6 +227,9 @@ impl LineEditor {
                     if self.editing_index.is_some() {
                         InputAction::DeleteEdited
                     } else {
+                        // Readline: delete the character under the cursor.
+                        // Quit on an empty buffer is handled by the app.
+                        self.delete_at_cursor();
                         InputAction::Nothing
                     }
                 }
@@ -528,12 +531,18 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_outside_edit_is_noop_in_editor() {
+    fn ctrl_d_outside_edit_deletes_char_under_cursor() {
         let mut ed = LineEditor::new();
         let q = Queue::new();
-        ed.handle_key(key(KeyCode::Char('x')), &q);
+        ed.insert_str("abc");
+        ed.handle_key(key(KeyCode::Home), &q);
         let action = ed.handle_key(ctrl('d'), &q);
         assert_eq!(action, InputAction::Nothing);
+        assert_eq!(ed.buffer, "bc");
+        assert_eq!(ed.cursor, 0);
+        ed.handle_key(key(KeyCode::End), &q);
+        ed.handle_key(ctrl('d'), &q);
+        assert_eq!(ed.buffer, "bc", "Ctrl-D at end of line is a no-op");
     }
 
     #[test]

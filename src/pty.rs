@@ -53,8 +53,12 @@ impl ShellPty {
             .unwrap_or_else(|| "/bin/sh".to_string());
         let kind = ShellKind::detect_from_path(&shell_path);
 
-        // Try to write the integration script so it can be sourced.
-        let integration_script = write_integration_script(kind).ok();
+        // A supported shell must have working hooks; silently falling back
+        // leaves a queue that accepts commands but never dispatches them.
+        let integration_script = match kind {
+            ShellKind::Sh => None,
+            _ => Some(write_integration_script(kind).context("prepare shell integration")?),
+        };
         let mut session_dirs = Vec::new();
 
         let mut cmd = CommandBuilder::new(&shell_path);
@@ -66,18 +70,17 @@ impl ShellPty {
         match kind {
             ShellKind::Zsh => {
                 cmd.arg("-i");
-                if let Some(script) = &integration_script
-                    && let Some(zdotdir) = prepare_zdotdir(script)
-                {
+                if let Some(script) = &integration_script {
+                    let zdotdir = prepare_zdotdir(script).context("prepare zsh startup files")?;
                     cmd.env("ZDOTDIR", &zdotdir);
                     session_dirs.push(zdotdir);
                 }
             }
             ShellKind::Bash => {
                 cmd.arg("--noprofile");
-                if let Some(script) = &integration_script
-                    && let Some((rcfile, session_dir)) = prepare_bash_rcfile(script)
-                {
+                if let Some(script) = &integration_script {
+                    let (rcfile, session_dir) =
+                        prepare_bash_rcfile(script).context("prepare bash startup file")?;
                     cmd.arg("--rcfile");
                     cmd.arg(rcfile);
                     session_dirs.push(session_dir);
@@ -100,31 +103,34 @@ impl ShellPty {
             cmd.cwd(cwd);
         }
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .context("failed to spawn shell")?;
+        let child = match pair.slave.spawn_command(cmd) {
+            Ok(child) => child,
+            Err(error) => {
+                for dir in &session_dirs {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                return Err(error).context("failed to spawn shell");
+            }
+        };
 
         // Drop the slave; the child holds it open via its fd.
         drop(pair.slave);
+        let pty = Self {
+            master: pair.master,
+            child,
+            session_dirs,
+        };
 
-        let reader = pair
+        let reader = pty
             .master
             .try_clone_reader()
             .context("failed to clone pty reader")?;
-        let writer = pair
+        let writer = pty
             .master
             .take_writer()
             .context("failed to take pty writer")?;
 
-        Ok((
-            Self {
-                master: pair.master,
-                child,
-                session_dirs,
-            },
-            PtyIo { reader, writer },
-        ))
+        Ok((pty, PtyIo { reader, writer }))
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -151,10 +157,31 @@ impl ShellPty {
     pub fn session_dirs(&self) -> &[PathBuf] {
         &self.session_dirs
     }
+
+    /// Programs can read keys or passwords without entering the alternate
+    /// screen (less -X, REPLs, read -s, ssh). Inspect the actual terminal
+    /// discipline rather than depending on their prompt wording.
+    pub fn needs_direct_input(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use nix::sys::termios::LocalFlags;
+            self.master.get_termios().is_some_and(|termios| {
+                !termios.local_flags.contains(LocalFlags::ICANON)
+                    || !termios.local_flags.contains(LocalFlags::ECHO)
+            })
+        }
+        #[cfg(not(unix))]
+        false
+    }
 }
 
 impl Drop for ShellPty {
     fn drop(&mut self) {
+        // Also cover early errors after spawning (raw-mode setup, input or
+        // output failure); otherwise the shell can outlive its wrapper.
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
+        }
         for dir in self.session_dirs.drain(..) {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -201,22 +228,23 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
          \x20 _CMDQ_USER_ZDOTDIR=\"$ZDOTDIR\"\n\
          fi\n\
          export _CMDQ_SYNTHETIC_ZDOTDIR _CMDQ_USER_ZDOTDIR\n\
-         export ZDOTDIR=\"$_CMDQ_SYNTHETIC_ZDOTDIR\"\n\
-         _cmdq_source_user_zdot_file() {{\n\
-         \x20 local _cmdq_file=\"$1\"\n\
-         \x20 local _cmdq_saved_zdotdir=\"${{ZDOTDIR:-}}\"\n\
-         \x20 export ZDOTDIR=\"$_CMDQ_USER_ZDOTDIR\"\n\
-         \x20 if [[ -n \"$_CMDQ_USER_ZDOTDIR\" && -f \"$_CMDQ_USER_ZDOTDIR/$_cmdq_file\" ]]; then\n\
-         \x20\x20 source \"$_CMDQ_USER_ZDOTDIR/$_cmdq_file\"\n\
-         \x20 fi\n\
-         \x20 export ZDOTDIR=\"$_cmdq_saved_zdotdir\"\n\
-         }}\n"
+         export ZDOTDIR=\"$_CMDQ_SYNTHETIC_ZDOTDIR\"\n"
     );
     write_file_atomic(&zdotdir.join(".zshenv"), zshenv.as_bytes()).ok()?;
 
+    // Source the user's file at top level, never from inside a function:
+    // `typeset -U path PATH` or `typeset -U fpath` at the top of a zshrc
+    // would otherwise become function-local and vanish (taking every
+    // autoloadable function, including add-zsh-hook, with it).
     let mk = |dest: &Path, file: &str, also_source_integration: bool| -> Option<()> {
         let mut content = format!(
-            "if (( $+functions[_cmdq_source_user_zdot_file] )); then\n  _cmdq_source_user_zdot_file {file}\nfi\n"
+            "if [[ -n \"${{_CMDQ_USER_ZDOTDIR:-}}\" && -f \"$_CMDQ_USER_ZDOTDIR/{file}\" ]]; then\n\
+             \x20 _cmdq_saved_zdotdir=\"${{ZDOTDIR:-}}\"\n\
+             \x20 export ZDOTDIR=\"$_CMDQ_USER_ZDOTDIR\"\n\
+             \x20 source \"$_CMDQ_USER_ZDOTDIR/{file}\"\n\
+             \x20 export ZDOTDIR=\"$_cmdq_saved_zdotdir\"\n\
+             \x20 unset _cmdq_saved_zdotdir\n\
+             fi\n"
         );
         if also_source_integration {
             let script_q = shell_single_quote(script);
