@@ -101,10 +101,6 @@ const ESC_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 /// the status-message fade timer.
 const PANEL_MIN_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 
-/// Maximum time to hold a trailing escape-sequence fragment while waiting to
-/// see if it becomes an alt-screen or bracketed-paste mode switch.
-const MODE_PENDING_TIMEOUT: Duration = Duration::from_millis(600);
-
 /// How long to wait for the terminal's cursor-position reply at startup.
 /// Every real terminal answers well within this; the fallback is the old
 /// bottom-row assumption.
@@ -780,7 +776,6 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
     let (mut term_cols, mut term_rows) = (cols, rows);
     let mut shell_cursor = CursorTracker::new(term_cols, term_rows);
     let mut mode_pending = Vec::new();
-    let mut mode_pending_since: Option<Instant> = None;
     let mut last_paint = PaintClock::forced();
     let mut paint_pending = false;
     let mut output_generation: u64 = 0;
@@ -852,10 +847,7 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
                     let process_len = bytes.len().saturating_sub(pending_len);
                     if pending_len > 0 {
                         mode_pending.extend_from_slice(&bytes[process_len..]);
-                        mode_pending_since = Some(Instant::now());
                         bytes.truncate(process_len);
-                    } else {
-                        mode_pending_since = None;
                     }
                     if bytes.is_empty() {
                         continue;
@@ -1041,22 +1033,11 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
         }
         let _ = stdout.flush();
 
-        if !mode_pending.is_empty()
-            && mode_pending_since
-                .map(|since| since.elapsed() >= MODE_PENDING_TIMEOUT)
-                .unwrap_or(false)
-        {
-            flush_mode_pending(
-                &mut stdout,
-                layout,
-                &mut shell_cursor,
-                &mut state,
-                &mut mode_pending,
-            )?;
-            mode.reset();
-            mode_pending_since = None;
-            let _ = stdout.flush();
-        }
+        // An unfinished escape sequence has no printable content. Keep it
+        // buffered until complete (or child exit): timing it out lets a later
+        // cursor move or panel repaint splice bytes into the child's sequence.
+        // Slow programs, network links, and busy runners can pause arbitrarily
+        // between fragments of the same terminal control sequence.
 
         state.tick_status();
         flush_pending_escape_if_due(&mut state, &mut writer);

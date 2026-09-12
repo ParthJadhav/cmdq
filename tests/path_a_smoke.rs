@@ -24,6 +24,7 @@ fn cmdq_binary_path() -> std::path::PathBuf {
 /// from a custom HOME (so the inner shell emits prompt markers reliably).
 /// Returns master PTY, child handle, and a recv stream of bytes.
 struct Harness {
+    home: std::path::PathBuf,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
@@ -70,6 +71,7 @@ impl Harness {
         cmd.arg("/bin/bash");
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", &tmp);
+        cmd.env("XDG_DATA_HOME", tmp.join("data"));
 
         let child = pair.slave.spawn_command(cmd).ok()?;
         drop(pair.slave);
@@ -87,6 +89,7 @@ impl Harness {
         });
 
         Some(Self {
+            home: tmp,
             master: pair.master,
             child,
             rx,
@@ -1268,7 +1271,7 @@ fn slow_progress_split_alt_screen_enter_stays_contiguous() {
 
     writer
         .write_all(
-            b"sleep 2; printf '\\033'; sleep 0.45; printf '[?104'; sleep 0.3; printf '9hSLOW_ALT\\033[?1049l'; sleep 2\r",
+            b"sleep 2; printf '\\033'; sleep 0.9; printf '[?104'; sleep 0.8; printf '9hSLOW_ALT\\033[?1049l'; sleep 2\r",
         )
         .unwrap();
     writer.flush().unwrap();
@@ -1305,7 +1308,7 @@ fn slow_progress_split_alt_screen_enter_stays_contiguous() {
 }
 
 #[test]
-fn incomplete_escape_fragment_flushes_before_child_outputs_more() {
+fn incomplete_escape_fragment_waits_for_completion() {
     let Some(h) = Harness::spawn("escpending") else {
         return;
     };
@@ -1316,17 +1319,26 @@ fn incomplete_escape_fragment_flushes_before_child_outputs_more() {
     let start = accum.len();
 
     writer
-        .write_all(b"printf 'PENDING_ESC:\\033'; sleep 1; printf ':AFTER\\n'\r")
+        .write_all(b"printf 'PENDING_ESC:\\033'; while [ ! -f \"$HOME/continue\" ]; do sleep 0.1; done; printf ':AFTER\\n'\r")
         .unwrap();
     writer.flush().unwrap();
 
-    let flushed = h.wait_for(&mut accum, Duration::from_millis(800), |s| {
+    assert!(h.wait_for(&mut accum, Duration::from_secs(3), |s| {
         let tail = &s[start..];
-        contains(tail, b"PENDING_ESC:\x1b")
-    });
+        find_bytes(tail, b"\x1b]133;C;cmdq=1")
+            .is_some_and(|index| contains(&tail[index..], b"PENDING_ESC:"))
+    }));
+    h.drain_for(&mut accum, Duration::from_millis(700));
     assert!(
-        flushed,
-        "trailing ESC fragment should be forwarded after a short timeout; output: {:?}",
+        !contains(&accum[start..], b"PENDING_ESC:\x1b"),
+        "an incomplete escape must not reach the terminal before its continuation"
+    );
+    std::fs::write(h.home.join("continue"), b"ready").unwrap();
+    assert!(
+        h.wait_for(&mut accum, Duration::from_secs(3), |s| {
+            contains(&s[start..], b"\x1b:AFTER")
+        }),
+        "completed escape was not forwarded: {:?}",
         String::from_utf8_lossy(&accum[start..])
     );
 

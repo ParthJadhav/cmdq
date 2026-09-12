@@ -25,6 +25,9 @@
 
 ### Fixed
 
+- Split terminal control sequences remain intact even when a program or network
+  pauses between fragments; panel rendering no longer corrupts delayed sequences.
+
 - Starting an idle draft captures immediately typed follow-up characters before
   the shell's command-start marker arrives.
 - Terminal mode checks remain compatible with the updated nix dependency and
