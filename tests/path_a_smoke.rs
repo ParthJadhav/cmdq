@@ -1028,6 +1028,8 @@ fn split_alt_screen_enter_is_not_interleaved_with_panel_release() {
 
 #[test]
 fn mouse_capture_releases_panel_and_forwards_mouse_events() {
+    // Configure input before announcing readiness. Bash's read -s -n can
+    // otherwise flush a mouse reply arriving before it changes terminal mode.
     let Some(h) = Harness::spawn("mouse-capture") else {
         return;
     };
@@ -1038,7 +1040,7 @@ fn mouse_capture_releases_panel_and_forwards_mouse_events() {
     let start = accum.len();
     writer
         .write_all(
-            b"sleep 2; printf '\\033[?1006h'; IFS= read -r -s -n 11 mouse; printf '\\nMOUSE_HEX:'; printf '%s' \"$mouse\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; printf '\\033[?1006l'; sleep 2\r",
+            b"sleep 2; stty -icanon -echo; printf '\\033[?1006h'; mouse=$(dd bs=1 count=11 2>/dev/null); printf '\\nMOUSE_HEX:'; printf '%s' \"$mouse\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; stty sane; printf '\\033[?1006l'; sleep 2\r",
         )
         .unwrap();
     writer.flush().unwrap();
@@ -1101,7 +1103,7 @@ fn focus_events_are_forwarded_when_child_enables_focus_reporting() {
     let start = accum.len();
     writer
         .write_all(
-            b"printf '\\033[?1004h'; IFS= read -r -s -n 3 focus; printf '\\nFOCUS_HEX:'; printf '%s' \"$focus\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; printf '\\033[?1004l'\r",
+            b"stty -icanon -echo; printf '\\033[?1004h'; focus=$(dd bs=1 count=3 2>/dev/null); printf '\\nFOCUS_HEX:'; printf '%s' \"$focus\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; stty sane; printf '\\033[?1004l'\r",
         )
         .unwrap();
     writer.flush().unwrap();
