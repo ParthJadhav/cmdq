@@ -10,6 +10,8 @@ use crate::queue::Queue;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputAction {
     Nothing,
+    CompletionUnavailable,
+    FinishEditFirst,
     /// Forward these raw bytes to the PTY (ie. send to the running child).
     ForwardToChild(Vec<u8>),
     /// Enqueue a new command (committed from the input buffer).
@@ -54,6 +56,7 @@ pub struct LineEditor {
     pub editing_index: Option<usize>,
     /// Conditional flag for the in-progress draft / edit.
     pub conditional: bool,
+    saved_draft: Option<(String, usize, bool)>,
 }
 
 impl LineEditor {
@@ -66,9 +69,24 @@ impl LineEditor {
         self.cursor = 0;
         self.editing_index = None;
         self.conditional = false;
+        self.saved_draft = None;
+    }
+
+    /// Return to the draft without losing its cursor or execution condition.
+    pub fn finish_edit(&mut self) {
+        let draft = self.saved_draft.take();
+        self.reset();
+        if let Some((buffer, cursor, conditional)) = draft {
+            self.buffer = buffer;
+            self.cursor = cursor;
+            self.conditional = conditional;
+        }
     }
 
     pub fn load_for_edit(&mut self, index: usize, item_command: &str, conditional: bool) {
+        if self.editing_index.is_none() {
+            self.saved_draft = Some((self.buffer.clone(), self.cursor, self.conditional));
+        }
         self.buffer = item_command.to_string();
         self.cursor = self.buffer.len();
         self.editing_index = Some(index);
@@ -216,7 +234,10 @@ impl LineEditor {
         match key.code {
             KeyCode::Char(c) if ctrl => match c {
                 'c' | 'C' => {
-                    if !self.buffer.is_empty() {
+                    if self.editing_index.is_some() {
+                        self.finish_edit();
+                        InputAction::CancelEdit
+                    } else if !self.buffer.is_empty() {
                         self.reset();
                         InputAction::Nothing
                     } else {
@@ -269,6 +290,12 @@ impl LineEditor {
                 _ => InputAction::Nothing,
             },
             KeyCode::Char(c) if alt => match c {
+                's' | 'S' => {
+                    self.conditional = !self.conditional;
+                    InputAction::ToggleChain {
+                        now_on: self.conditional,
+                    }
+                }
                 'b' | 'B' => {
                     self.move_word_left();
                     InputAction::Nothing
@@ -323,28 +350,29 @@ impl LineEditor {
             KeyCode::Up if alt && self.editing_index.is_some() => InputAction::MoveEditedUp,
             KeyCode::Up if alt => InputAction::Nothing,
             KeyCode::Up => {
+                if self.has_unsaved_edit(queue) {
+                    return InputAction::FinishEditFirst;
+                }
                 self.navigate_up(queue);
                 InputAction::Nothing
             }
             KeyCode::Down if alt && self.editing_index.is_some() => InputAction::MoveEditedDown,
             KeyCode::Down if alt => InputAction::Nothing,
             KeyCode::Down => {
+                if self.has_unsaved_edit(queue) {
+                    return InputAction::FinishEditFirst;
+                }
                 self.navigate_down(queue);
                 InputAction::Nothing
             }
-            KeyCode::Tab => {
-                self.conditional = !self.conditional;
-                InputAction::ToggleChain {
-                    now_on: self.conditional,
-                }
-            }
+            KeyCode::Tab => InputAction::CompletionUnavailable,
             KeyCode::Enter => {
                 let cmd = self.buffer.trim().to_string();
                 if cmd.is_empty() {
                     InputAction::Nothing
                 } else if let Some(idx) = self.editing_index {
                     let cond = self.conditional;
-                    self.reset();
+                    self.finish_edit();
                     InputAction::CommitEdit {
                         index: idx,
                         command: cmd,
@@ -361,7 +389,7 @@ impl LineEditor {
             }
             KeyCode::Esc => {
                 if self.editing_index.is_some() {
-                    self.reset();
+                    self.finish_edit();
                     InputAction::CancelEdit
                 } else {
                     self.reset();
@@ -370,6 +398,12 @@ impl LineEditor {
             }
             _ => InputAction::Nothing,
         }
+    }
+
+    fn has_unsaved_edit(&self, queue: &Queue) -> bool {
+        self.editing_index
+            .and_then(|i| queue.items().get(i))
+            .is_some_and(|item| self.buffer != item.command || self.conditional != item.conditional)
     }
 
     fn navigate_up(&mut self, queue: &Queue) {
@@ -393,7 +427,7 @@ impl LineEditor {
             None => {}
             Some(i) => {
                 if i + 1 >= queue.len() {
-                    self.reset();
+                    self.finish_edit();
                 } else if let Some(item) = queue.items().get(i + 1) {
                     self.load_for_edit(i + 1, &item.command, item.conditional);
                 }
@@ -712,15 +746,65 @@ mod tests {
     }
 
     #[test]
-    fn tab_toggles_conditional() {
+    fn alt_s_toggles_conditional() {
         let mut ed = LineEditor::new();
         let q = Queue::new();
         assert!(!ed.conditional);
-        let a = ed.handle_key(key(KeyCode::Tab), &q);
+        let a = ed.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT), &q);
         assert_eq!(a, InputAction::ToggleChain { now_on: true });
         assert!(ed.conditional);
-        let a = ed.handle_key(key(KeyCode::Tab), &q);
+        let a = ed.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT), &q);
         assert_eq!(a, InputAction::ToggleChain { now_on: false });
         assert!(!ed.conditional);
+    }
+    #[test]
+    fn queue_navigation_preserves_draft_cursor_and_condition() {
+        for exit in [KeyCode::Esc, KeyCode::Down, KeyCode::Enter] {
+            let mut q = Queue::new();
+            q.push("queued", false);
+            let mut ed = LineEditor::new();
+            ed.insert_str("echo 界 draft");
+            ed.cursor = 5;
+            ed.conditional = true;
+            ed.handle_key(key(KeyCode::Up), &q);
+            ed.handle_key(key(exit), &q);
+            assert_eq!(ed.buffer, "echo 界 draft");
+            assert_eq!(ed.cursor, 5);
+            assert!(ed.conditional);
+            assert_eq!(ed.editing_index, None);
+        }
+    }
+
+    #[test]
+    fn navigating_cannot_discard_unsaved_queue_edits() {
+        let mut q = Queue::new();
+        q.push("first", false);
+        q.push("second", false);
+        let mut ed = LineEditor::new();
+        ed.handle_key(key(KeyCode::Up), &q);
+        ed.insert_str(" changed");
+        for direction in [KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                ed.handle_key(key(direction), &q),
+                InputAction::FinishEditFirst
+            );
+            assert_eq!(ed.buffer, "second changed");
+            assert_eq!(ed.editing_index, Some(1));
+        }
+    }
+
+    #[test]
+    fn tab_never_changes_command_or_execution_condition() {
+        let mut ed = LineEditor::new();
+        ed.insert_str("echo example");
+        for condition in [false, true] {
+            ed.conditional = condition;
+            assert_eq!(
+                ed.handle_key(key(KeyCode::Tab), &Queue::new()),
+                InputAction::CompletionUnavailable
+            );
+            assert_eq!(ed.conditional, condition);
+            assert_eq!(ed.buffer, "echo example");
+        }
     }
 }

@@ -6,6 +6,8 @@
 //! passthrough). Each test owns its full PTY setup so they can run in
 //! parallel without sharing state.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -15,19 +17,14 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 const SHELL_INTEGRATION_BASH: &str = include_str!("../shell/integration.bash");
 
 fn cmdq_binary_path() -> std::path::PathBuf {
-    if let Some(p) = option_env!("CARGO_BIN_EXE_cmdq") {
-        return std::path::PathBuf::from(p);
-    }
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("debug")
-        .join("cmdq")
+    common::cmdq_binary().into()
 }
 
 /// Spawn `cmdq` under bash with the project's OSC 133 integration sourced
 /// from a custom HOME (so the inner shell emits prompt markers reliably).
 /// Returns master PTY, child handle, and a recv stream of bytes.
 struct Harness {
+    home: std::path::PathBuf,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
@@ -74,6 +71,7 @@ impl Harness {
         cmd.arg("/bin/bash");
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", &tmp);
+        cmd.env("XDG_DATA_HOME", tmp.join("data"));
 
         let child = pair.slave.spawn_command(cmd).ok()?;
         drop(pair.slave);
@@ -91,6 +89,7 @@ impl Harness {
         });
 
         Some(Self {
+            home: tmp,
             master: pair.master,
             child,
             rx,
@@ -1029,6 +1028,8 @@ fn split_alt_screen_enter_is_not_interleaved_with_panel_release() {
 
 #[test]
 fn mouse_capture_releases_panel_and_forwards_mouse_events() {
+    // Configure input before announcing readiness. Bash's read -s -n can
+    // otherwise flush a mouse reply arriving before it changes terminal mode.
     let Some(h) = Harness::spawn("mouse-capture") else {
         return;
     };
@@ -1039,7 +1040,7 @@ fn mouse_capture_releases_panel_and_forwards_mouse_events() {
     let start = accum.len();
     writer
         .write_all(
-            b"sleep 2; printf '\\033[?1006h'; IFS= read -r -s -n 11 mouse; printf '\\nMOUSE_HEX:'; printf '%s' \"$mouse\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; printf '\\033[?1006l'; sleep 2\r",
+            b"sleep 2; stty -icanon -echo; printf '\\033[?1006h'; mouse=$(dd bs=1 count=11 2>/dev/null); printf '\\nMOUSE_HEX:'; printf '%s' \"$mouse\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; stty sane; printf '\\033[?1006l'; sleep 2\r",
         )
         .unwrap();
     writer.flush().unwrap();
@@ -1102,7 +1103,7 @@ fn focus_events_are_forwarded_when_child_enables_focus_reporting() {
     let start = accum.len();
     writer
         .write_all(
-            b"printf '\\033[?1004h'; IFS= read -r -s -n 3 focus; printf '\\nFOCUS_HEX:'; printf '%s' \"$focus\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; printf '\\033[?1004l'\r",
+            b"stty -icanon -echo; printf '\\033[?1004h'; focus=$(dd bs=1 count=3 2>/dev/null); printf '\\nFOCUS_HEX:'; printf '%s' \"$focus\" | od -An -tx1 | tr -d ' \\n'; printf '\\n'; stty sane; printf '\\033[?1004l'\r",
         )
         .unwrap();
     writer.flush().unwrap();
@@ -1272,7 +1273,7 @@ fn slow_progress_split_alt_screen_enter_stays_contiguous() {
 
     writer
         .write_all(
-            b"sleep 2; printf '\\033'; sleep 0.45; printf '[?104'; sleep 0.3; printf '9hSLOW_ALT\\033[?1049l'; sleep 2\r",
+            b"sleep 2; printf '\\033'; sleep 0.9; printf '[?104'; sleep 0.8; printf '9hSLOW_ALT\\033[?1049l'; sleep 2\r",
         )
         .unwrap();
     writer.flush().unwrap();
@@ -1309,7 +1310,7 @@ fn slow_progress_split_alt_screen_enter_stays_contiguous() {
 }
 
 #[test]
-fn incomplete_escape_fragment_flushes_before_child_outputs_more() {
+fn incomplete_escape_fragment_waits_for_completion() {
     let Some(h) = Harness::spawn("escpending") else {
         return;
     };
@@ -1320,17 +1321,26 @@ fn incomplete_escape_fragment_flushes_before_child_outputs_more() {
     let start = accum.len();
 
     writer
-        .write_all(b"printf 'PENDING_ESC:\\033'; sleep 1; printf ':AFTER\\n'\r")
+        .write_all(b"printf 'PENDING_ESC:\\033'; while [ ! -f \"$HOME/continue\" ]; do sleep 0.1; done; printf ':AFTER\\n'\r")
         .unwrap();
     writer.flush().unwrap();
 
-    let flushed = h.wait_for(&mut accum, Duration::from_millis(800), |s| {
+    assert!(h.wait_for(&mut accum, Duration::from_secs(3), |s| {
         let tail = &s[start..];
-        contains(tail, b"PENDING_ESC:\x1b")
-    });
+        find_bytes(tail, b"\x1b]133;C;cmdq=1")
+            .is_some_and(|index| contains(&tail[index..], b"PENDING_ESC:"))
+    }));
+    h.drain_for(&mut accum, Duration::from_millis(700));
     assert!(
-        flushed,
-        "trailing ESC fragment should be forwarded after a short timeout; output: {:?}",
+        !contains(&accum[start..], b"PENDING_ESC:\x1b"),
+        "an incomplete escape must not reach the terminal before its continuation"
+    );
+    std::fs::write(h.home.join("continue"), b"ready").unwrap();
+    assert!(
+        h.wait_for(&mut accum, Duration::from_secs(3), |s| {
+            contains(&s[start..], b"\x1b:AFTER")
+        }),
+        "completed escape was not forwarded: {:?}",
         String::from_utf8_lossy(&accum[start..])
     );
 

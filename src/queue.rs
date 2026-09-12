@@ -3,8 +3,8 @@
 //! The queue is an ordered list of pending commands. Each item has a unique id
 //! (monotonic), a command string, and a flag for "only run if previous
 //! succeeded" (conditional). Persistence uses a JSON file under the user's
-//! data dir so the queue survives across cmdq restarts within the user's
-//! environment.
+//! data dir. Each cmdq launch owns a separate file; saved commands are never
+//! automatically loaded into a different shell session.
 //!
 //! Operations are intentionally simple — push/edit/remove/move/clear — and
 //! independent of any UI concerns. Writes are atomic, use unique temporary
@@ -730,7 +730,35 @@ fn lock_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!("{file_name}.lock"))
 }
 
-/// Fallible default persistence path: `$XDG_DATA_HOME/cmdq/queue.json`,
+/// Allocate a fresh queue file for this launch. Atomically reserving a directory
+/// prevents reuse even after PID recycling or a clock adjustment. Do not derive
+/// identity from cwd, the parent process, or inherited environment variables:
+/// separate shells can share all of those.
+pub fn new_session_path() -> Result<PathBuf> {
+    let legacy_path = try_default_path()?;
+    new_session_path_in(legacy_path.parent().expect("queue path has a parent"))
+}
+
+fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
+    let queues_dir = data_dir.join("queues");
+    std::fs::create_dir_all(&queues_dir)
+        .with_context(|| format!("creating queue directory {}", queues_dir.display()))?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0u64.. {
+        let dir = queues_dir.join(format!("{}-{timestamp}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir.join("queue.json")),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
+        }
+    }
+    unreachable!("session directory counter exhausted")
+}
+
+/// Legacy shared persistence path: `$XDG_DATA_HOME/cmdq/queue.json`,
 /// the platform data directory, or `~/.cmdq/queue.json`.
 pub fn try_default_path() -> Result<PathBuf> {
     if let Some(dir) = crate::paths::xdg_data_home() {
@@ -769,6 +797,40 @@ fn fallback_temp_path() -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn session_paths_isolate_queues_and_preserve_legacy_state() {
+        let temp = tempdir().unwrap();
+        let legacy_path = temp.path().join("queue.json");
+        let mut legacy = Queue::new();
+        legacy.push("echo legacy", false);
+        legacy.save(&legacy_path).unwrap();
+        let first_path = new_session_path_in(temp.path()).unwrap();
+        let second_path = new_session_path_in(temp.path()).unwrap();
+        assert_ne!(first_path, second_path);
+        assert_ne!(lock_path_for(&first_path), lock_path_for(&second_path));
+        let mut first = Queue::load_or_default(&first_path);
+        assert!(first.is_empty());
+        first.push("echo first", false);
+        first.paused = true;
+        first.save(&first_path).unwrap();
+        let second = Queue::load_or_default(&second_path);
+        assert!(second.is_empty());
+        assert!(!second.paused);
+        second.save(&second_path).unwrap();
+        assert_eq!(
+            Queue::load_or_default(&first_path).front().unwrap().command,
+            "echo first"
+        );
+        assert!(Queue::load_or_default(&first_path).paused);
+        assert_eq!(
+            Queue::load_or_default(&legacy_path)
+                .front()
+                .unwrap()
+                .command,
+            "echo legacy"
+        );
+    }
 
     #[test]
     fn push_and_len() {

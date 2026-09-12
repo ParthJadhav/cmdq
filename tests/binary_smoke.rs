@@ -3,6 +3,8 @@
 //! (raw mode + keyboard enhancement + bracketed paste set up cleanly) and
 //! shuts down without panicking when the inner shell exits.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
@@ -11,16 +13,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 fn cmdq_binary_path() -> std::path::PathBuf {
-    // Tests are run from the crate root; CARGO_BIN_EXE_cmdq is the canonical
-    // way to find the built test artifact. If unavailable, fall back to the
-    // debug build path.
-    if let Some(p) = option_env!("CARGO_BIN_EXE_cmdq") {
-        return std::path::PathBuf::from(p);
-    }
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("debug")
-        .join("cmdq")
+    common::cmdq_binary().into()
 }
 
 #[test]
@@ -166,7 +159,6 @@ fn binary_normal_exit_removes_session_lease() {
     let xdg = tmp.join("xdg");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(xdg.join("cmdq")).unwrap();
-    let queue_path = xdg.join("cmdq").join("queue.json");
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -185,6 +177,7 @@ fn binary_normal_exit_removes_session_lease() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -250,7 +243,6 @@ fn binary_sigterm_removes_session_lease() {
     let xdg = tmp.join("xdg");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(xdg.join("cmdq")).unwrap();
-    let queue_path = xdg.join("cmdq").join("queue.json");
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -269,6 +261,7 @@ fn binary_sigterm_removes_session_lease() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -1186,7 +1179,6 @@ fn binary_prompt_alt_edit_fast_followup_queues_next_command() {
 
     let first_file = tmp.join("alt-first.txt");
     let second_file = tmp.join("alt-second.txt");
-    let queue_path = xdg.join("cmdq").join("queue.json");
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 30,
@@ -1205,6 +1197,7 @@ fn binary_prompt_alt_edit_fast_followup_queues_next_command() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -1302,7 +1295,6 @@ fn binary_prompt_newline_paste_fast_followup_queues_next_command() {
 
     let first_file = home.join("paste-first.txt");
     let second_file = home.join("paste-second.txt");
-    let queue_path = xdg.join("cmdq").join("queue.json");
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 30,
@@ -1320,6 +1312,7 @@ fn binary_prompt_newline_paste_fast_followup_queues_next_command() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -1418,7 +1411,6 @@ fn binary_leading_noop_paste_fast_followup_queues_next_command() {
 
     let first_file = home.join("leading-noop-first.txt");
     let second_file = home.join("leading-noop-second.txt");
-    let queue_path = xdg.join("cmdq").join("queue.json");
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 30,
@@ -1436,6 +1428,7 @@ fn binary_leading_noop_paste_fast_followup_queues_next_command() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -1531,7 +1524,6 @@ fn binary_esc_clear_then_esc_stays_in_queue_editor() {
     .unwrap();
 
     let side_effect = tmp.join("esc-clear.txt");
-    let queue_path = xdg.join("cmdq").join("queue.json");
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 30,
@@ -1549,6 +1541,7 @@ fn binary_esc_clear_then_esc_stays_in_queue_editor() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -2088,7 +2081,6 @@ fn running_press_any_key_prompt_releases_after_single_key_answer() {
     .unwrap();
     let done_file = tmp.join("press-any-key-done.txt");
     let queued_file = tmp.join("press-any-key-queued.txt");
-    let queue_path = xdg.join("cmdq").join("queue.json");
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -2107,6 +2099,7 @@ fn running_press_any_key_prompt_releases_after_single_key_answer() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -2149,7 +2142,9 @@ fn running_press_any_key_prompt_releases_after_single_key_answer() {
     writer.flush().unwrap();
     assert!(
         wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-            contains_bytes(s, b"\r\nAFTER_ANY_KEY\r\n")
+            // The panel may restore the cursor after the leading newline.
+            // The trailing real CRLF distinguishes output from the echoed command.
+            contains_bytes(s, b"AFTER_ANY_KEY\r\n")
         }),
         "single-key answer did not reach child; output:\n{}",
         String::from_utf8_lossy(&accum)
@@ -2794,591 +2789,6 @@ fn binary_auto_installs_fish_integration_for_clean_home() {
 }
 
 #[test]
-fn restored_queue_resumes_and_dispatches_at_prompt() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
-    let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
-
-    let tmp = std::env::temp_dir().join(format!(
-        "cmdq-restored-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let home = tmp.join("home");
-    let xdg = tmp.join("xdg");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(xdg.join("cmdq")).unwrap();
-
-    let side_effect = tmp.join("restored-side-effect.txt");
-    let queued_command = format!(
-        "printf 'RESTORED_QUEUE_RAN\\n' > {}",
-        shell_quote(&side_effect)
-    );
-    let queue_path = xdg.join("cmdq").join("queue.json");
-    let queue_json = serde_json::json!({
-        "items": [
-            {
-                "id": 0,
-                "command": queued_command,
-                "conditional": false
-            }
-        ],
-        "next_id": 1,
-        "paused": false
-    });
-    std::fs::write(&queue_path, queue_json.to_string()).unwrap();
-
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
-    let mut cmd = CommandBuilder::new(bin.as_os_str());
-    cmd.arg("--shell");
-    cmd.arg("/bin/bash");
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("HOME", &home);
-    cmd.env("XDG_DATA_HOME", &xdg);
-
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
-    drop(pair.slave);
-
-    let mut reader = pair.master.try_clone_reader().unwrap();
-    let mut writer = pair.master.take_writer().unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut accum = Vec::new();
-    let saw_prompt = wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-        s.windows(b"\x1b]133;A".len()).any(|w| w == b"\x1b]133;A")
-    });
-    assert!(
-        saw_prompt,
-        "restored-queue test never saw prompt marker; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-
-    writer.write_all(&[0x18]).unwrap(); // Ctrl-X resumes the restored queue.
-    writer.flush().unwrap();
-
-    let dispatched = wait_for(&rx, &mut accum, Duration::from_secs(8), |_| {
-        file_contains(&side_effect, "RESTORED_QUEUE_RAN") && queue_file_is_empty(&queue_path)
-    });
-
-    let _ = writer.write_all(b"exit\r");
-    let _ = writer.flush();
-    std::thread::sleep(Duration::from_millis(200));
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    assert!(
-        dispatched,
-        "restored queue did not dispatch and persist empty queue; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-}
-
-#[test]
-fn restored_queue_startup_mentions_active_peer_session() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
-    let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
-
-    let tmp = std::env::temp_dir().join(format!(
-        "cmdq-peer-session-{}-{}",
-        std::process::id(),
-        monotonic_test_suffix()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let home = tmp.join("home");
-    let xdg = tmp.join("xdg");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(xdg.join("cmdq")).unwrap();
-
-    let queue_path = xdg.join("cmdq").join("queue.json");
-    let queue_json = serde_json::json!({
-        "items": [
-            {
-                "id": 0,
-                "command": "echo keep-me",
-                "conditional": false
-            }
-        ],
-        "next_id": 1,
-        "paused": false
-    });
-    std::fs::write(&queue_path, queue_json.to_string()).unwrap();
-
-    let first_pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
-    let mut first_cmd = CommandBuilder::new(bin.as_os_str());
-    first_cmd.arg("--shell");
-    first_cmd.arg("/bin/bash");
-    first_cmd.env("TERM", "xterm-256color");
-    first_cmd.env("HOME", &home);
-    first_cmd.env("XDG_DATA_HOME", &xdg);
-
-    let mut first_child = first_pair.slave.spawn_command(first_cmd).unwrap();
-    drop(first_pair.slave);
-    let mut first_reader = first_pair.master.try_clone_reader().unwrap();
-    let _first_writer = first_pair.master.take_writer().unwrap();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = first_reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-        }
-    });
-
-    assert!(
-        wait_until(Duration::from_secs(5), || {
-            cmdq::session_lease::active_peer_count(&queue_path).unwrap_or(0) >= 1
-        }),
-        "first cmdq session did not create a session lease"
-    );
-
-    let second_pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
-    let mut second_cmd = CommandBuilder::new(bin.as_os_str());
-    second_cmd.arg("--shell");
-    second_cmd.arg("/bin/bash");
-    second_cmd.env("TERM", "xterm-256color");
-    second_cmd.env("HOME", &home);
-    second_cmd.env("XDG_DATA_HOME", &xdg);
-
-    let mut second_child = second_pair.slave.spawn_command(second_cmd).unwrap();
-    drop(second_pair.slave);
-
-    let mut second_reader = second_pair.master.try_clone_reader().unwrap();
-    let _second_writer = second_pair.master.take_writer().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = second_reader.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut accum = Vec::new();
-    let reported_peer = wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-        contains_bytes(s, b"another session active")
-    });
-
-    let _ = first_child.kill();
-    let _ = second_child.kill();
-    let _ = first_child.wait();
-    let _ = second_child.wait();
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    assert!(
-        reported_peer,
-        "second restored-queue startup did not report active peer session; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-}
-
-#[test]
-fn restored_queue_from_other_cwd_requires_double_resume_confirmation() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
-    let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
-
-    let tmp = std::env::temp_dir().join(format!(
-        "cmdq-restored-cwd-{}-{}",
-        std::process::id(),
-        monotonic_test_suffix()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let home = tmp.join("home");
-    let xdg = tmp.join("xdg");
-    let origin = tmp.join("original-cwd");
-    let current = tmp.join("current-cwd");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(xdg.join("cmdq")).unwrap();
-    std::fs::create_dir_all(&origin).unwrap();
-    std::fs::create_dir_all(&current).unwrap();
-
-    let side_effect = tmp.join("restored-cwd-side-effect.txt");
-    let queued_command = format!(
-        "printf 'RESTORED_CWD_QUEUE_RAN\\n' > {}",
-        shell_quote(&side_effect)
-    );
-    let queue_path = xdg.join("cmdq").join("queue.json");
-    let queue_json = serde_json::json!({
-        "items": [
-            {
-                "id": 0,
-                "command": queued_command,
-                "conditional": false
-            }
-        ],
-        "next_id": 1,
-        "origin_cwd": origin,
-        "paused": false
-    });
-    std::fs::write(&queue_path, queue_json.to_string()).unwrap();
-
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
-    let mut cmd = CommandBuilder::new(bin.as_os_str());
-    cmd.arg("--shell");
-    cmd.arg("/bin/bash");
-    cmd.cwd(&current);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("HOME", &home);
-    cmd.env("XDG_DATA_HOME", &xdg);
-
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
-    drop(pair.slave);
-
-    let mut reader = pair.master.try_clone_reader().unwrap();
-    let mut writer = pair.master.take_writer().unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut accum = Vec::new();
-    assert!(
-        wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-            s.windows(b"\x1b]133;A".len()).any(|w| w == b"\x1b]133;A")
-                && contains_bytes(s, b"saved in ")
-        }),
-        "restored-cwd test never saw prompt and cwd warning; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-
-    writer.write_all(&[0x18]).unwrap(); // first Ctrl-X confirms cwd mismatch.
-    writer.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(
-        !side_effect.exists(),
-        "first Ctrl-X should warn, not dispatch queue from another cwd"
-    );
-
-    writer.write_all(b"x").unwrap(); // any other interaction cancels confirmation.
-    writer.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    writer.write_all(&[0x18]).unwrap(); // warns again instead of dispatching.
-    writer.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(
-        !side_effect.exists(),
-        "Ctrl-X after another key should warn again, not dispatch"
-    );
-
-    writer.write_all(&[0x15]).unwrap(); // Ctrl-U: clear the stray editor input.
-    writer.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    writer.write_all(&[0x18]).unwrap(); // first fresh Ctrl-X warns.
-    writer.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    writer.write_all(&[0x18]).unwrap(); // second Ctrl-X resumes.
-    writer.flush().unwrap();
-    let dispatched = wait_for(&rx, &mut accum, Duration::from_secs(8), |_| {
-        file_contains(&side_effect, "RESTORED_CWD_QUEUE_RAN") && queue_file_is_empty(&queue_path)
-    });
-
-    let _ = writer.write_all(b"exit\r");
-    let _ = writer.flush();
-    std::thread::sleep(Duration::from_millis(200));
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    assert!(
-        dispatched,
-        "second Ctrl-X did not dispatch restored queue; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-}
-
-#[test]
-fn restored_queue_rechecks_shell_cwd_after_bashrc_cd() {
-    let bin = cmdq_binary_path();
-    if !bin.exists() || !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
-
-    let tmp = std::env::temp_dir().join(format!(
-        "cmdq-restored-rc-cd-{}-{}",
-        std::process::id(),
-        monotonic_test_suffix()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let home = tmp.join("home");
-    let xdg = tmp.join("xdg");
-    let origin = tmp.join("original-cwd");
-    let after_rc = tmp.join("after-rc-cwd");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(xdg.join("cmdq")).unwrap();
-    std::fs::create_dir_all(&origin).unwrap();
-    std::fs::create_dir_all(&after_rc).unwrap();
-    std::fs::write(
-        home.join(".bashrc"),
-        format!("cd {}\n", shell_quote(&after_rc)),
-    )
-    .unwrap();
-
-    let side_effect = tmp.join("restored-rc-cd-side-effect.txt");
-    let queued_command = format!(
-        "printf 'RESTORED_RC_CD_QUEUE_RAN\\n' > {}",
-        shell_quote(&side_effect)
-    );
-    let queue_path = xdg.join("cmdq").join("queue.json");
-    let queue_json = serde_json::json!({
-        "items": [
-            {
-                "id": 0,
-                "command": queued_command,
-                "conditional": false
-            }
-        ],
-        "next_id": 1,
-        "origin_cwd": origin,
-        "paused": false
-    });
-    std::fs::write(&queue_path, queue_json.to_string()).unwrap();
-
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
-    let mut cmd = CommandBuilder::new(bin.as_os_str());
-    cmd.arg("--shell");
-    cmd.arg("/bin/bash");
-    cmd.cwd(&origin);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("HOME", &home);
-    cmd.env("XDG_DATA_HOME", &xdg);
-
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
-    drop(pair.slave);
-
-    let mut reader = pair.master.try_clone_reader().unwrap();
-    let mut writer = pair.master.take_writer().unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut accum = Vec::new();
-    assert!(
-        wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-            s.windows(b"\x1b]133;A".len()).any(|w| w == b"\x1b]133;A")
-                && contains_bytes(s, b"restored")
-        }),
-        "restored-rc-cd test never saw prompt and restored warning; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-
-    writer.write_all(&[0x18]).unwrap();
-    writer.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(
-        !side_effect.exists(),
-        "first Ctrl-X should warn because bashrc changed cwd"
-    );
-
-    writer.write_all(&[0x18]).unwrap();
-    writer.flush().unwrap();
-    let dispatched = wait_for(&rx, &mut accum, Duration::from_secs(8), |_| {
-        file_contains(&side_effect, "RESTORED_RC_CD_QUEUE_RAN") && queue_file_is_empty(&queue_path)
-    });
-
-    let _ = writer.write_all(b"exit\r");
-    let _ = writer.flush();
-    std::thread::sleep(Duration::from_millis(200));
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    assert!(
-        dispatched,
-        "second Ctrl-X did not dispatch restored queue after cwd confirmation; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-}
-
-#[test]
-fn restored_queue_clears_stale_cwd_warning_after_bashrc_cd_back_to_origin() {
-    let bin = cmdq_binary_path();
-    if !bin.exists() || !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
-
-    let tmp = std::env::temp_dir().join(format!(
-        "cmdq-restored-rc-cd-back-{}-{}",
-        std::process::id(),
-        monotonic_test_suffix()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let home = tmp.join("home");
-    let xdg = tmp.join("xdg");
-    let origin = tmp.join("original-cwd");
-    let launch_cwd = tmp.join("launch-cwd");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(xdg.join("cmdq")).unwrap();
-    std::fs::create_dir_all(&origin).unwrap();
-    std::fs::create_dir_all(&launch_cwd).unwrap();
-    std::fs::write(
-        home.join(".bashrc"),
-        format!("cd {}\n", shell_quote(&origin)),
-    )
-    .unwrap();
-
-    let side_effect = tmp.join("restored-rc-cd-back-side-effect.txt");
-    let queued_command = format!(
-        "printf 'RESTORED_RC_CD_BACK_QUEUE_RAN\\n' > {}",
-        shell_quote(&side_effect)
-    );
-    let queue_path = xdg.join("cmdq").join("queue.json");
-    let queue_json = serde_json::json!({
-        "items": [
-            {
-                "id": 0,
-                "command": queued_command,
-                "conditional": false
-            }
-        ],
-        "next_id": 1,
-        "origin_cwd": origin,
-        "paused": false
-    });
-    std::fs::write(&queue_path, queue_json.to_string()).unwrap();
-
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
-    let mut cmd = CommandBuilder::new(bin.as_os_str());
-    cmd.arg("--shell");
-    cmd.arg("/bin/bash");
-    cmd.cwd(&launch_cwd);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("HOME", &home);
-    cmd.env("XDG_DATA_HOME", &xdg);
-
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
-    drop(pair.slave);
-
-    let mut reader = pair.master.try_clone_reader().unwrap();
-    let mut writer = pair.master.take_writer().unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut accum = Vec::new();
-    assert!(
-        wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-            s.windows(b"\x1b]133;A".len()).any(|w| w == b"\x1b]133;A")
-                && contains_bytes(s, b"restored")
-        }),
-        "restored-rc-cd-back test never saw prompt and restored warning; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-
-    writer.write_all(&[0x18]).unwrap();
-    writer.flush().unwrap();
-    let dispatched = wait_for(&rx, &mut accum, Duration::from_secs(8), |_| {
-        file_contains(&side_effect, "RESTORED_RC_CD_BACK_QUEUE_RAN")
-            && queue_file_is_empty(&queue_path)
-    });
-
-    let _ = writer.write_all(b"exit\r");
-    let _ = writer.flush();
-    std::thread::sleep(Duration::from_millis(200));
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    assert!(
-        dispatched,
-        "single Ctrl-X should dispatch once bashrc returns to queue origin; output:\n{}",
-        String::from_utf8_lossy(&accum)
-    );
-}
-
-#[test]
 fn queued_command_origin_tracks_inner_shell_cd() {
     if !std::path::Path::new("/bin/bash").exists() {
         return;
@@ -3421,6 +2831,7 @@ fn queued_command_origin_tracks_inner_shell_cd() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -3467,7 +2878,6 @@ fn queued_command_origin_tracks_inner_shell_cd() {
     writer.flush().unwrap();
     std::thread::sleep(Duration::from_millis(300));
 
-    let queue_path = xdg.join("cmdq").join("queue.json");
     let queue_json = std::fs::read_to_string(&queue_path).unwrap_or_default();
     let saved: serde_json::Value = serde_json::from_str(&queue_json).unwrap();
 
@@ -3648,6 +3058,7 @@ fn queued_command_origin_handles_literal_percent_in_cwd() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -3679,7 +3090,6 @@ fn queued_command_origin_handles_literal_percent_in_cwd() {
     writer.flush().unwrap();
     std::thread::sleep(Duration::from_millis(300));
 
-    let queue_path = xdg.join("cmdq").join("queue.json");
     let queue_json = std::fs::read_to_string(&queue_path).unwrap_or_default();
     let saved: serde_json::Value = serde_json::from_str(&queue_json).unwrap();
     let expected = std::fs::canonicalize(&percent_cwd)
@@ -3745,6 +3155,7 @@ fn queued_command_origin_handles_bel_in_cwd() {
     cmd.env("XDG_DATA_HOME", &xdg);
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let queue_path = session_queue_path(&xdg, child.process_id().unwrap());
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -3776,7 +3187,6 @@ fn queued_command_origin_handles_bel_in_cwd() {
     writer.flush().unwrap();
     std::thread::sleep(Duration::from_millis(300));
 
-    let queue_path = xdg.join("cmdq").join("queue.json");
     assert!(wait_until(Duration::from_secs(5), || file_contains(
         &queue_path,
         "BEL_CWD_TRACKED"
@@ -3806,7 +3216,7 @@ fn queued_command_origin_handles_bel_in_cwd() {
 }
 
 #[test]
-fn corrupt_persisted_queue_is_backed_up_and_reported_on_startup() {
+fn corrupt_legacy_queue_is_ignored_and_left_untouched() {
     if !std::path::Path::new("/bin/bash").exists() {
         return;
     }
@@ -3861,9 +3271,10 @@ fn corrupt_persisted_queue_is_backed_up_and_reported_on_startup() {
     });
 
     let mut accum = Vec::new();
-    let reported = wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
-        contains_bytes(s, b"cmdq: ignored corrupt queue file")
+    let saw_prompt = wait_for(&rx, &mut accum, Duration::from_secs(5), |s| {
+        contains_bytes(s, b"\x1b]133;A")
     });
+    assert_eq!(std::fs::read(&queue_path).unwrap(), b"{broken queue");
     let backups: Vec<_> = std::fs::read_dir(&queue_dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -3883,11 +3294,12 @@ fn corrupt_persisted_queue_is_backed_up_and_reported_on_startup() {
     let _ = std::fs::remove_dir_all(&tmp);
 
     assert!(
-        reported,
-        "corrupt queue backup warning was not visible; output:\n{}",
+        saw_prompt,
+        "shell did not start with a corrupt legacy queue; output:\n{}",
         String::from_utf8_lossy(&accum)
     );
-    assert_eq!(backups.len(), 1, "expected one corrupt queue backup");
+    assert!(backups.is_empty(), "legacy queue must not be touched");
+    assert!(!contains_bytes(&accum, b"ignored corrupt queue file"));
 }
 
 #[test]
@@ -4111,10 +3523,27 @@ fn file_contains(path: &Path, needle: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn queue_file_is_empty(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|s| s.contains("\"items\":[]"))
-        .unwrap_or(false)
+fn session_queue_path(xdg: &Path, pid: u32) -> std::path::PathBuf {
+    let mut found = None;
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            found = std::fs::read_dir(xdg.join("cmdq/queues"))
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("{pid}-"))
+                })
+                .map(|entry| entry.path().join("queue.json"));
+            found.is_some()
+        }),
+        "session queue directory was not created for PID {pid}"
+    );
+    found.unwrap()
 }
 
 fn session_dirs_clean(xdg: &Path) -> bool {

@@ -101,10 +101,6 @@ const ESC_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 /// the status-message fade timer.
 const PANEL_MIN_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 
-/// Maximum time to hold a trailing escape-sequence fragment while waiting to
-/// see if it becomes an alt-screen or bracketed-paste mode switch.
-const MODE_PENDING_TIMEOUT: Duration = Duration::from_millis(600);
-
 /// How long to wait for the terminal's cursor-position reply at startup.
 /// Every real terminal answers well within this; the fallback is the old
 /// bottom-row assumption.
@@ -118,8 +114,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// pipe, so this only bounds the latency of time-driven transitions.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How often an idle session checks whether another cmdq session edited the
-/// shared queue file.
+/// How often an idle session checks its own persisted queue file for changes.
 const QUEUE_SYNC_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How often a running cmdq refreshes its lightweight "I'm alive" lease.
@@ -205,8 +200,10 @@ struct AppState {
     /// Timestamp of the most recent bare-Esc press; a second Esc within
     /// ESC_DOUBLE_TAP_WINDOW toggles passthrough.
     last_esc_at: Option<Instant>,
-    /// Has the user pressed Tab (chain toggle) at least once this session?
-    chain_seen: bool,
+    /// Persistent outcome, separate from transient confirmations.
+    activity: Option<String>,
+    /// Most recent removal batch, with original positions and working directories.
+    recovery: Vec<(usize, queue::QueueItem)>,
     status: String,
     /// Time the current status was set; used to fade it after STATUS_TTL.
     status_set_at: Option<Instant>,
@@ -274,6 +271,7 @@ impl AppState {
             || self.show_help
             || (self.queue.paused && !self.queue.is_empty())
             || self.draft_pending()
+            || self.activity.is_some()
     }
 
     /// Whether cmdq's editor owns keystrokes (rather than forwarding to PTY).
@@ -281,6 +279,11 @@ impl AppState {
     /// what `manual_passthrough` does (raw input mode).
     fn editor_owns_input(&self) -> bool {
         self.panel_should_be_visible()
+            && (self.command_long_running()
+                || self.force_queue
+                || self.show_help
+                || (self.queue.paused && !self.queue.is_empty())
+                || self.draft_pending())
             && !self.manual_passthrough
             && !self.child_input_prompt_active()
     }
@@ -338,9 +341,9 @@ impl AppState {
         }
         self.force_queue = !self.force_queue;
         let msg = if self.force_queue {
-            "force-queue ON (Ctrl-Q to disable)"
+            "Building queue — Ctrl-X starts it, Ctrl-Q returns to shell"
         } else {
-            "force-queue OFF"
+            "Typing into shell"
         };
         self.set_status(msg);
     }
@@ -354,9 +357,9 @@ impl AppState {
     fn toggle_manual_passthrough(&mut self) {
         self.manual_passthrough = !self.manual_passthrough;
         let msg = if self.manual_passthrough {
-            "raw input: keys go to the running app (Esc Esc / Ctrl-\\ to exit)"
+            "Typing into running program — F2 returns to queue"
         } else {
-            "raw input off"
+            "Typing into queue"
         };
         self.set_status(msg);
     }
@@ -615,7 +618,11 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
     let pending_signals = prepare_signal_cleanup().context("prepare signal cleanup")?;
 
     let session_cwd = std::env::current_dir().ok();
-    let queue_path = queue::try_default_path()?;
+    let queue_path = if queue_supported {
+        queue::new_session_path()?
+    } else {
+        queue::try_default_path()?
+    };
     let (mut queue, queue_load_warning) = if queue_supported {
         Queue::load_or_default_with_warning(&queue_path)
     } else {
@@ -744,7 +751,8 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
         pending_clear_at: None,
         last_exit_code: None,
         last_esc_at: None,
-        chain_seen: false,
+        activity: None,
+        recovery: Vec::new(),
         status: startup_status.unwrap_or_default(),
         status_set_at: if has_startup_status {
             Some(Instant::now())
@@ -768,7 +776,6 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
     let (mut term_cols, mut term_rows) = (cols, rows);
     let mut shell_cursor = CursorTracker::new(term_cols, term_rows);
     let mut mode_pending = Vec::new();
-    let mut mode_pending_since: Option<Instant> = None;
     let mut last_paint = PaintClock::forced();
     let mut paint_pending = false;
     let mut output_generation: u64 = 0;
@@ -840,10 +847,7 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
                     let process_len = bytes.len().saturating_sub(pending_len);
                     if pending_len > 0 {
                         mode_pending.extend_from_slice(&bytes[process_len..]);
-                        mode_pending_since = Some(Instant::now());
                         bytes.truncate(process_len);
-                    } else {
-                        mode_pending_since = None;
                     }
                     if bytes.is_empty() {
                         continue;
@@ -1029,22 +1033,11 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
         }
         let _ = stdout.flush();
 
-        if !mode_pending.is_empty()
-            && mode_pending_since
-                .map(|since| since.elapsed() >= MODE_PENDING_TIMEOUT)
-                .unwrap_or(false)
-        {
-            flush_mode_pending(
-                &mut stdout,
-                layout,
-                &mut shell_cursor,
-                &mut state,
-                &mut mode_pending,
-            )?;
-            mode.reset();
-            mode_pending_since = None;
-            let _ = stdout.flush();
-        }
+        // An unfinished escape sequence has no printable content. Keep it
+        // buffered until complete (or child exit): timing it out lets a later
+        // cursor move or panel repaint splice bytes into the child's sequence.
+        // Slow programs, network links, and busy runners can pause arbitrarily
+        // between fragments of the same terminal control sequence.
 
         state.tick_status();
         flush_pending_escape_if_due(&mut state, &mut writer);
@@ -1166,6 +1159,11 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
                             input_buffer: &state.editor.buffer,
                             input_cursor: state.editor.cursor,
                             editing_index: state.editor.editing_index,
+                            conditional: state.editor.conditional,
+                            shell_input: !state.editor_owns_input()
+                                && !matches!(state.shell_state, ShellState::Running),
+                            activity: state.activity.as_deref(),
+                            can_recover: !state.recovery.is_empty(),
                             status: &state.status,
                             pending_quit: state.pending_quit_active(),
                             pending_clear: state.pending_clear_active(),
@@ -1333,6 +1331,11 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
                 input_buffer: &state.editor.buffer,
                 input_cursor: state.editor.cursor,
                 editing_index: state.editor.editing_index,
+                conditional: state.editor.conditional,
+                shell_input: !state.editor_owns_input()
+                    && !matches!(state.shell_state, ShellState::Running),
+                activity: state.activity.as_deref(),
+                can_recover: !state.recovery.is_empty(),
                 status: &state.status,
                 pending_quit: state.pending_quit_active(),
                 pending_clear: state.pending_clear_active(),
@@ -1476,6 +1479,10 @@ fn panel_render_key(
     view.input_cursor.hash(&mut h);
     view.editing_index.hash(&mut h);
     view.status.hash(&mut h);
+    view.conditional.hash(&mut h);
+    view.shell_input.hash(&mut h);
+    view.activity.hash(&mut h);
+    view.can_recover.hash(&mut h);
     (view.pending_quit, view.pending_clear, view.show_help).hash(&mut h);
     (
         height,
@@ -1924,6 +1931,11 @@ fn desired_layout(state: &AppState, term_rows: u16) -> PanelLayout {
         input_buffer: &state.editor.buffer,
         input_cursor: state.editor.cursor,
         editing_index: state.editor.editing_index,
+        conditional: state.editor.conditional,
+        shell_input: !state.editor_owns_input()
+            && !matches!(state.shell_state, ShellState::Running),
+        activity: state.activity.as_deref(),
+        can_recover: !state.recovery.is_empty(),
         status: &state.status,
         pending_quit: state.pending_quit_active(),
         pending_clear: state.pending_clear_active(),
@@ -2339,6 +2351,7 @@ fn handle_command_end(
         state.queue.paused = true;
         state.last_sigint_at = None;
         state.queue_dirty = true;
+        state.activity = Some("Paused after interruption — Ctrl-X resumes the queue".into());
         state.set_status("Ctrl-C detected — queue paused. Ctrl-X to resume, Ctrl-K to clear.");
         return false;
     }
@@ -2350,6 +2363,8 @@ fn handle_command_end(
     if state.editor.editing_index.is_some() {
         state.queue.paused = true;
         state.queue_dirty = true;
+        state.activity =
+            Some("Queue paused while editing — save or cancel, then Ctrl-X resumes".into());
         state.set_status("queue paused while editing — Enter save, Esc cancel, Ctrl-X resume");
         return false;
     }
@@ -2388,6 +2403,14 @@ fn dispatch_next_eligible(
     while let Some(item) = state.queue.front().cloned() {
         if item.conditional && prev_exit != Some(0) {
             let _ = state.queue.remove(item.id);
+            if !skipped_conditional {
+                state.recovery.clear();
+            }
+            state.recovery.push((state.recovery.len(), item));
+            state.activity = Some(format!(
+                "{} skipped — previous command did not succeed",
+                state.recovery.len()
+            ));
             skipped_conditional = true;
             continue;
         }
@@ -2574,6 +2597,38 @@ fn handle_key_with_bytes(
     if matches!(key.code, KeyCode::F(1)) && !state.effective_passthrough() {
         state.show_help = true;
         return KeyOutcome::Continue;
+    }
+
+    if matches!(key.code, KeyCode::F(2))
+        && !state.auto_passthrough
+        && state.queue_supported
+        && (state.panel_should_be_visible() || state.manual_passthrough)
+    {
+        state.last_esc_at = None;
+        // A detected prompt already owns input. F2 explicitly opens the queue.
+        if state.child_input_prompt_active() {
+            state.force_queue = true;
+            state.manual_passthrough = false;
+        } else {
+            state.toggle_manual_passthrough();
+        }
+        return KeyOutcome::Continue;
+    }
+    if state.panel_should_be_visible()
+        && !state.effective_passthrough()
+        && !state.child_input_prompt_active()
+    {
+        if matches!(key.code, KeyCode::F(3)) {
+            state.activity = None;
+            state.status.clear();
+            state.status_set_at = None;
+            return KeyOutcome::Continue;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('u' | 'U'))
+        {
+            restore_removed_commands(state);
+            return KeyOutcome::Continue;
+        }
     }
 
     // Double-Esc toggles passthrough — SSH-safe alternative to Ctrl-\.
@@ -2775,6 +2830,12 @@ fn handle_key_with_bytes(
     let action = state.editor.handle_key(key, &state.queue);
     match action {
         InputAction::Nothing => {}
+        InputAction::CompletionUnavailable => state.set_status(
+            "Completion is not available in the queue — Alt-S changes the run condition",
+        ),
+        InputAction::FinishEditFirst => {
+            state.set_status("Unsaved changes — Enter saves, Esc cancels before switching items")
+        }
         InputAction::ForwardToChild(bytes) => {
             if bytes.contains(&ETX) {
                 state.last_sigint_at = Some(Instant::now());
@@ -2805,7 +2866,9 @@ fn handle_key_with_bytes(
                 && !state.queue.paused
             {
                 let prev_exit = state.last_exit_code;
-                dispatch_next_eligible(state, prev_exit, writer);
+                if dispatch_next_eligible(state, prev_exit, writer) {
+                    mark_command_started(state);
+                }
             }
         }
         InputAction::CommitEdit {
@@ -2829,12 +2892,17 @@ fn handle_key_with_bytes(
                 && let Some(removed) = state.queue.remove(id)
             {
                 state.queue_dirty = true;
+                state.recovery = vec![(idx, removed.clone())];
+                state.activity = Some(format!(
+                    "Removed {} — Alt-U restores paused",
+                    truncate_for_status(&removed.command)
+                ));
                 state.set_status(format!(
                     "removed: {}",
                     truncate_for_status(&removed.command)
                 ));
             }
-            state.editor.reset();
+            state.editor.finish_edit();
         }
         InputAction::MoveEditedUp => {
             if let Some(idx) = state.editor.editing_index
@@ -2867,17 +2935,10 @@ fn handle_key_with_bytes(
             state.show_help = true;
         }
         InputAction::ToggleChain { now_on } => {
-            let msg: String = if !state.chain_seen {
-                state.chain_seen = true;
-                if now_on {
-                    "chain ON — runs only if the previous command succeeds (Tab to undo)".into()
-                } else {
-                    "chain OFF".into()
-                }
-            } else if now_on {
-                "chain ON".into()
+            let msg = if now_on {
+                "Only if previous succeeds — Alt-S changes to Always"
             } else {
-                "chain OFF".into()
+                "Always run after previous command finishes"
             };
             state.set_status(msg);
         }
@@ -2901,7 +2962,8 @@ fn flush_pending_escape_if_due(state: &mut AppState, writer: &mut Box<dyn Write 
 }
 
 fn toggle_queue_pause(state: &mut AppState, writer: &mut Box<dyn Write + Send>) {
-    let was_paused = state.queue.paused;
+    let starting_queue = state.force_queue && matches!(state.shell_state, ShellState::AtPrompt);
+    let was_paused = state.queue.paused || starting_queue;
     if was_paused && state.editor.editing_index.is_some() {
         state.set_status("finish or cancel the edit before resuming the queue");
         return;
@@ -2929,7 +2991,11 @@ fn toggle_queue_pause(state: &mut AppState, writer: &mut Box<dyn Write + Send>) 
         state.resume_cwd_warning = None;
         state.resume_cwd_confirmation_started_at = None;
     }
-    state.queue.paused = !state.queue.paused;
+    state.queue.paused = !was_paused;
+    if starting_queue {
+        state.force_queue = false;
+    }
+    state.activity = None;
     state.restored_queue_paused_locally = false;
     state.queue_dirty = true;
     if state.queue.paused {
@@ -2939,7 +3005,9 @@ fn toggle_queue_pause(state: &mut AppState, writer: &mut Box<dyn Write + Send>) 
         && !state.queue.is_empty()
     {
         let before = state.queue.len();
-        if !dispatch_next_eligible(state, None, writer) && state.queue.len() == before {
+        if dispatch_next_eligible(state, None, writer) {
+            mark_command_started(state);
+        } else if state.queue.len() == before {
             state.set_status("queue resumed");
         }
     } else {
@@ -2963,6 +3031,11 @@ fn clear_queue(state: &mut AppState) {
         return;
     }
     state.pending_clear_at = None;
+    state.recovery = state.queue.items().iter().cloned().enumerate().collect();
+    state.activity = Some(format!(
+        "Cleared {} commands — Alt-U restores paused",
+        state.recovery.len()
+    ));
     state.queue.clear();
     state.queue.paused = false;
     state.restored_queue_paused_locally = false;
@@ -2970,10 +3043,43 @@ fn clear_queue(state: &mut AppState) {
     state.resume_cwd_warning = None;
     state.resume_cwd_confirmation_started_at = None;
     if state.editor.editing_index.is_some() {
-        state.editor.reset();
+        state.editor.finish_edit();
     }
     state.queue_dirty = true;
     state.set_status("queue cleared");
+}
+
+/// Restore only the latest removal batch. Fresh IDs avoid resurrecting an old
+/// cross-session identity, and pausing prevents recovery from executing anything.
+fn restore_removed_commands(state: &mut AppState) {
+    if state.editor.editing_index.is_some() {
+        state.set_status("Save or cancel the edit before restoring commands");
+        return;
+    }
+    if state.recovery.is_empty() {
+        state.set_status("No removed commands to restore");
+        return;
+    }
+    let recovered = std::mem::take(&mut state.recovery);
+    let count = recovered.len();
+    for (position, item) in recovered {
+        let id = state
+            .queue
+            .push_with_origin(item.command, item.conditional, item.origin_cwd);
+        let last = state.queue.len() - 1;
+        for _ in position.min(last)..last {
+            state.queue.move_up(id);
+        }
+    }
+    state.queue.paused = true;
+    state.queue_dirty = true;
+    state.restored_queue_paused_locally = false;
+    state.resume_cwd_warning = resume_cwd_warning_for_current_shell(state);
+    state.resume_cwd_confirmation_started_at = None;
+    state.activity = Some(format!(
+        "Restored {count} commands — queue paused; review before Ctrl-X resumes"
+    ));
+    state.set_status("restored to paused queue");
 }
 
 fn truncate_for_status(s: &str) -> String {
@@ -3824,6 +3930,7 @@ fn restore_terminal_display(out: &mut impl Write, state: TerminalRestoreState) -
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crossterm::event::KeyCode;
     use std::sync::{Arc, Mutex};
 
     /// Capture-into-Vec writer for unit tests of dispatch logic.
@@ -3877,7 +3984,8 @@ pub(crate) mod tests {
             pending_clear_at: None,
             last_exit_code: None,
             last_esc_at: None,
-            chain_seen: false,
+            activity: None,
+            recovery: Vec::new(),
             status: String::new(),
             status_set_at: None,
             queue_dirty: false,
@@ -6672,5 +6780,176 @@ pub(crate) mod tests {
             mb / elapsed.as_secs_f64(),
             elapsed.as_nanos() as f64 / (mb * 1024.0 * 1024.0)
         );
+    }
+    #[test]
+    fn f2_preserves_draft_and_routes_input_to_program_then_queue() {
+        let mut s = make_state();
+        s.command_started_at = Some(Instant::now() - QUEUE_PANEL_DELAY);
+        s.editor.insert_str("echo later");
+        s.editor.cursor = 5;
+        s.editor.conditional = true;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        handle_key(
+            KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        assert_eq!(&*buf.lock().unwrap(), b"y");
+        handle_key(
+            KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        assert!(s.editor_owns_input());
+        assert_eq!(s.editor.buffer, "echo later");
+        assert_eq!(s.editor.cursor, 5);
+        assert!(s.editor.conditional);
+    }
+
+    #[test]
+    fn f2_belongs_to_fullscreen_programs() {
+        let mut s = make_state();
+        s.auto_passthrough = true;
+        s.child_alt_screen = true;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        handle_key(
+            KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        assert!(!s.manual_passthrough);
+        assert!(!buf.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovery_notice_does_not_capture_shell_typing_or_paste() {
+        let mut s = make_state();
+        s.shell_state = ShellState::AtPrompt;
+        s.queue.push("echo later", false);
+        clear_queue(&mut s);
+        clear_queue(&mut s);
+        s.status_set_at = Some(Instant::now() - STATUS_TTL);
+        s.tick_status();
+        assert!(s.panel_should_be_visible());
+        assert!(!s.editor_owns_input());
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        handle_paste("cho hello".into(), &mut s, &mut w);
+        assert_eq!(&*buf.lock().unwrap(), b"echo hello");
+        assert!(s.editor.buffer.is_empty());
+        assert!(s.activity.is_some());
+    }
+
+    #[test]
+    fn restore_deleted_item_preserves_position_origin_condition_and_draft() {
+        let mut s = make_state();
+        s.force_queue = true;
+        s.queue.push("first", false);
+        s.queue
+            .push_with_origin("second", true, Some(PathBuf::from("/tmp/elsewhere")));
+        s.queue.push("third", false);
+        s.editor.insert_str("my draft");
+        s.editor.load_for_edit(1, "second", true);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut s,
+            &mut w,
+        );
+        assert_eq!(s.editor.buffer, "my draft");
+        restore_removed_commands(&mut s);
+        assert!(s.queue.paused);
+        assert_eq!(
+            s.queue
+                .items()
+                .iter()
+                .map(|i| i.command.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert!(s.queue.items()[1].conditional);
+        assert_eq!(
+            s.queue.items()[1].origin_cwd.as_deref(),
+            Some(std::path::Path::new("/tmp/elsewhere"))
+        );
+        assert!(
+            s.resume_cwd_warning.is_some(),
+            "recovery must retain the foreign-directory warning"
+        );
+        assert!(
+            buf.lock().unwrap().is_empty(),
+            "recovery must not execute anything"
+        );
+        restore_removed_commands(&mut s);
+        assert_eq!(s.queue.len(), 3, "undo is consumed exactly once");
+    }
+
+    #[test]
+    fn skipped_batch_remains_recoverable_after_later_command_dispatches() {
+        let mut s = make_state();
+        s.queue.push("skip one", true);
+        s.queue.push("skip two", true);
+        s.queue.push("echo run", false);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        assert!(dispatch_next_eligible(&mut s, Some(7), &mut w));
+        assert_eq!(&*buf.lock().unwrap(), b"echo run\n");
+        assert_eq!(s.recovery.len(), 2);
+        s.status_set_at = Some(Instant::now() - STATUS_TTL);
+        s.tick_status();
+        assert!(s.activity.as_deref().unwrap().contains("2 skipped"));
+        restore_removed_commands(&mut s);
+        assert_eq!(s.queue.len(), 2);
+        assert!(s.queue.paused);
+        assert_eq!(&*buf.lock().unwrap(), b"echo run\n");
+    }
+
+    #[test]
+    fn ctrl_x_starts_built_queue_without_extra_toggle() {
+        let mut s = make_state();
+        s.shell_state = ShellState::AtPrompt;
+        s.force_queue = true;
+        s.queue.push("echo start", false);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        toggle_queue_pause(&mut s, &mut w);
+        assert_eq!(&*buf.lock().unwrap(), b"echo start\n");
+        assert!(!s.force_queue);
+        assert!(!s.queue.paused);
+        assert!(matches!(s.shell_state, ShellState::Running));
+    }
+    #[test]
+    fn running_an_idle_draft_captures_immediate_followup_typing() {
+        let mut s = make_state();
+        s.shell_state = ShellState::AtPrompt;
+        s.command_started_at = None;
+        s.editor.insert_str("sleep 2");
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut s,
+            &mut w,
+        );
+        assert_eq!(&*buf.lock().unwrap(), b"sleep 2\n");
+        assert_eq!(s.editor.buffer, "e");
     }
 }

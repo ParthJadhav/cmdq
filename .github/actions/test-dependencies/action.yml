@@ -1,0 +1,13 @@
+name: Test dependencies
+description: Install every shell and interactive program required by the PTY tests.
+runs:
+  using: composite
+  steps:
+    - name: Linux shells and programs
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y zsh fish dash vim less tmux
+    - name: macOS shells and programs
+      if: runner.os == 'macOS'
+      shell: bash
+      run: brew install fish bash tmux

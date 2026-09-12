@@ -1,6 +1,8 @@
 //! Real shell and terminal-application tests with isolated homes.
 #![cfg(unix)]
 
+mod common;
+
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -20,7 +22,7 @@ struct Session {
     rx: Receiver<Vec<u8>>,
     output: Vec<u8>,
     query_tail: Vec<u8>,
-    dir: tempfile::TempDir,
+    dir: std::sync::Arc<tempfile::TempDir>,
 }
 
 impl Session {
@@ -28,6 +30,13 @@ impl Session {
         Self::new_with_zshrc(shell, "PROMPT='MATRIX> '\n")
     }
     fn new_with_zshrc(shell: &str, zshrc: &str) -> Option<Self> {
+        Self::new_in(
+            shell,
+            zshrc,
+            std::sync::Arc::new(tempfile::tempdir().unwrap()),
+        )
+    }
+    fn new_in(shell: &str, zshrc: &str, dir: std::sync::Arc<tempfile::TempDir>) -> Option<Self> {
         let Some(shell_path) = executable(shell) else {
             assert!(
                 std::env::var_os("CMDQ_REQUIRE_SHELL_MATRIX").is_none(),
@@ -36,7 +45,6 @@ impl Session {
             eprintln!("skipping unavailable shell: {shell}");
             return None;
         };
-        let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("fish")).unwrap();
@@ -56,7 +64,7 @@ impl Session {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cmdq"));
+        let mut cmd = CommandBuilder::new(common::cmdq_binary());
         cmd.args(["--shell", shell_path.to_str().unwrap()]);
         cmd.cwd(dir.path());
         for key in [
@@ -153,6 +161,16 @@ impl Session {
     fn file(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
+    fn queue_path(&self) -> PathBuf {
+        let prefix = format!("{}-", self.child.process_id().unwrap());
+        std::fs::read_dir(self.file("data/cmdq/queues"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .expect("session queue directory")
+            .path()
+            .join("queue.json")
+    }
     fn expect_file(&mut self, name: &str, contents: &str) {
         let until = Instant::now() + Duration::from_secs(8);
         while Instant::now() < until {
@@ -174,13 +192,83 @@ impl Drop for Session {
     }
 }
 
+#[test]
+fn simultaneous_shell_sessions_keep_queues_and_pause_state_independent() {
+    for shell in ["bash", "zsh", "fish"] {
+        let dir = std::sync::Arc::new(tempfile::tempdir().unwrap());
+        let legacy_path = dir.path().join("data/cmdq/queue.json");
+        let mut legacy = cmdq::queue::Queue::new();
+        legacy.push("printf legacy > legacy-result", false);
+        legacy.save(&legacy_path).unwrap();
+        let legacy_bytes = std::fs::read(&legacy_path).unwrap();
+        let Some(mut first) = Session::new_in(shell, "PROMPT='MATRIX> '\n", dir.clone()) else {
+            continue;
+        };
+        let first_path = first.queue_path();
+        assert!(cmdq::queue::Queue::load_or_default(&first_path).is_empty());
+        first.send(b"\x11printf first > first-result\r");
+        first.drain(Duration::from_millis(700));
+        // Clear and undo leaves the first queue paused with its command intact.
+        first.send(b"\x0b\x0b\x1bu");
+        first.drain(Duration::from_millis(700));
+        let first_saved = std::fs::read(&first_path).unwrap();
+        assert!(cmdq::queue::Queue::load_or_default(&first_path).paused);
+        assert_eq!(cmdq::queue::Queue::load_or_default(&first_path).len(), 1);
+
+        let mut second = Session::new_in(shell, "PROMPT='MATRIX> '\n", dir.clone()).unwrap();
+        let second_path = second.queue_path();
+        assert_ne!(first_path, second_path);
+        second.drain(Duration::from_millis(700));
+        let second_queue = cmdq::queue::Queue::load_or_default(&second_path);
+        assert!(
+            second_queue.is_empty(),
+            "{shell}: inherited the first queue"
+        );
+        assert!(
+            !second_queue.paused,
+            "{shell}: inherited the first pause state"
+        );
+        assert!(!String::from_utf8_lossy(&second.output).contains("another session active"));
+        second.send(b"\x11printf second > second-result\r");
+        second.drain(Duration::from_millis(700));
+        let second_queue = cmdq::queue::Queue::load_or_default(&second_path);
+        assert_eq!(second_queue.len(), 1);
+        assert_eq!(
+            second_queue.front().unwrap().command,
+            "printf second > second-result"
+        );
+        assert!(!second_queue.paused);
+
+        second.send(b"\x0b\x0b");
+        second.drain(Duration::from_millis(700));
+        assert!(cmdq::queue::Queue::load_or_default(&second_path).is_empty());
+        first.drain(Duration::from_millis(700));
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_saved);
+        second.send(b"\x1bu\x18"); // Undo and start only the second session's queue.
+        second.expect_file("second-result", "second");
+        second.drain(Duration::from_millis(700));
+        first.drain(Duration::from_millis(700));
+        assert!(!first.file("first-result").exists());
+        assert!(!first.file("legacy-result").exists());
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_saved);
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_bytes);
+
+        // A later launch must not adopt a stopped session's saved commands.
+        drop(first);
+        let third = Session::new_in(shell, "PROMPT='MATRIX> '\n", dir.clone()).unwrap();
+        assert_ne!(third.queue_path(), first_path);
+        assert!(cmdq::queue::Queue::load_or_default(&third.queue_path()).is_empty());
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_saved);
+    }
+}
+
 fn queue_lifecycle(shell: &str) {
     let Some(mut s) = Session::new(shell) else {
         return;
     };
     s.command("sh -c 'sleep 2; exit 7'");
     s.expect(b"\x1b]133;C;cmdq=1");
-    s.send(b"printf skipped > skipped\t\r");
+    s.send(b"printf skipped > skipped\x1bs\r");
     s.send(b"printf dispatched > dispatched\r");
     s.expect_file("dispatched", "dispatched");
     assert!(
@@ -193,7 +281,7 @@ fn queue_lifecycle(shell: &str) {
     s.command("sh -c 'sleep 2; exit 7'");
     s.expect(b"\x1b]133;C;cmdq=1");
     s.send(b"sh -c 'sleep 1; printf first > first'\r");
-    s.send(b"sh -c 'test -f first && printf second > second'\t\r");
+    s.send(b"sh -c 'test -f first && printf second > second'\x1bs\r");
     s.expect_file("second", "second");
 }
 
@@ -211,7 +299,7 @@ fn direct_input(shell: &str) {
     s.send(b"private-answer\r");
     s.expect_file("answer", "private-answer");
     s.expect(b"\x1b]133;D;0;cmdq=1");
-    let queue = std::fs::read_to_string(s.file("data/cmdq/queue.json")).unwrap_or_default();
+    let queue = std::fs::read_to_string(s.queue_path()).unwrap_or_default();
     assert!(!queue.contains("private-answer"));
     // A raw reader with no output also needs keys, including Ctrl-Q and Esc.
     s.command("sh -c 'stty raw -echo; head -c 2 > raw; stty sane'");
@@ -287,6 +375,44 @@ shell_tests!(zsh_queue, zsh_direct_input, zsh_real_programs, "zsh");
 shell_tests!(fish_queue, fish_direct_input, fish_real_programs, "fish");
 
 #[test]
+fn manual_queue_recovery_waits_for_explicit_start_in_all_shells() {
+    for shell in ["bash", "zsh", "fish"] {
+        let Some(mut s) = Session::new(shell) else {
+            continue;
+        };
+        s.send(b"\x11"); // Ctrl-Q: build at the prompt.
+        s.send(b"printf recovered > recovery-result\r");
+        s.send(b"\x0b\x0b"); // Ctrl-K twice: clear.
+        s.send(b"\x1bu"); // Alt-U: restore, still paused.
+        let path = s.queue_path();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            s.drain(Duration::from_millis(20));
+            let restored = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|q| {
+                    q["paused"] == true
+                        && q["items"].as_array().is_some_and(|items| items.len() == 1)
+                });
+            if restored {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{shell}: recovery was not persisted paused"
+            );
+        }
+        assert!(
+            !s.file("recovery-result").exists(),
+            "{shell}: restore ran without approval"
+        );
+        s.send(b"\x18"); // Ctrl-X: start with one press.
+        s.expect_file("recovery-result", "recovered");
+    }
+}
+
+#[test]
 fn zsh_rc_top_level_typeset_survives_the_startup_shim() {
     // A top-level `typeset` in ~/.zshrc must stay global. If the shim sourced
     // the file from inside a function, `path`/`fpath` would become locals:
@@ -325,7 +451,7 @@ fn install_fish_respects_config_home_and_symlink_chains() {
     let rc = config.join("fish/config.fish");
     std::os::unix::fs::symlink(&link, &rc).unwrap();
     for _ in 0..2 {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cmdq"))
+        let output = std::process::Command::new(common::cmdq_binary())
             .args(["--shell", "fish", "--install-integration"])
             .env("HOME", dir.path())
             .env("XDG_CONFIG_HOME", &config)
@@ -348,7 +474,7 @@ fn install_fish_respects_config_home_and_symlink_chains() {
 #[test]
 fn non_terminal_start_has_actionable_error_without_creating_state() {
     let dir = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cmdq"))
+    let output = std::process::Command::new(common::cmdq_binary())
         .env("XDG_DATA_HOME", dir.path())
         .output()
         .unwrap();
@@ -411,4 +537,84 @@ fn posix_shell_is_explicit_transparent_passthrough() {
     s.send(b"\x11");
     s.expect_file("input", "\x11");
     assert!(!s.file("data/cmdq/queue.json").exists());
+}
+
+fn editor_bug_bash(shell: &str) {
+    let Some(mut s) = Session::new(shell) else {
+        return;
+    };
+    // Edit, reorder, delete, and restore without losing the unfinished draft.
+    s.send(b"\x11printf first >> order\rprintf second >> order\r");
+    s.send(b"printf draft > draft");
+    s.send(b"\x1b[A\x1b[1;3A\r"); // Edit second, move it first, save.
+    s.send(b"\x1b[A\x04\x1bu"); // Delete first, restore paused.
+    s.send(b"\r\x18"); // Queue restored draft, explicitly start.
+    s.expect_file("order", "secondfirst");
+    s.expect_file("draft", "draft");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
+    s.drain(Duration::from_millis(150));
+
+    // A bracketed multiline paste remains one command in every hosted shell.
+    s.command("sleep 2");
+    s.expect(b"\x1b]133;C;cmdq=1");
+    s.send(b"\x1b[200~sh -c 'cat > pasted <<EOF\nhello\nworld\nEOF'\x1b[201~\r");
+    s.expect_file("pasted", "hello\nworld\n");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
+    s.drain(Duration::from_millis(150));
+
+    // F2 sends input to a canonical reader, then restores the exact draft.
+    s.command("sh -c 'read answer; printf %s \"$answer\" > answer'");
+    s.expect(b"\x1b]133;C;cmdq=1");
+    s.drain(Duration::from_millis(1750));
+    s.send(b"printf kept > kept\x1bOQyes\r");
+    s.expect_file("answer", "yes");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
+    s.send(b"\r");
+    s.expect_file("kept", "kept");
+}
+
+#[test]
+fn bash_editor_bug_bash() {
+    editor_bug_bash("bash");
+}
+#[test]
+fn zsh_editor_bug_bash() {
+    editor_bug_bash("zsh");
+}
+#[test]
+fn fish_editor_bug_bash() {
+    editor_bug_bash("fish");
+}
+
+#[test]
+fn interrupt_resize_and_recover_in_all_shells() {
+    for shell in ["bash", "zsh", "fish"] {
+        let Some(mut s) = Session::new(shell) else {
+            continue;
+        };
+        s.command("sleep 30");
+        s.expect(b"\x1b]133;C;cmdq=1");
+        s.send(b"printf queued > queued\rprintf resized > resized");
+        for (rows, cols) in [(8, 25), (2, 5), (40, 140), (30, 100)] {
+            s._master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            s.drain(Duration::from_millis(100));
+        }
+        s.send(b"\x03");
+        s.expect(b"\x1b]133;D;130;cmdq=1");
+        s.drain(Duration::from_millis(200));
+        assert!(
+            !s.file("queued").exists(),
+            "{shell}: interruption dispatched the queue"
+        );
+        s.send(b"\r\x18");
+        s.expect_file("queued", "queued");
+        s.expect_file("resized", "resized");
+    }
 }
