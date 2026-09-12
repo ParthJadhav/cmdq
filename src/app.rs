@@ -2150,9 +2150,13 @@ fn handle_osc_event(
         }
         osc133::Event::CommandStart => {
             mark_command_started(state);
-            // The real preexec hook has handed off from the shell editor;
-            // unlike optimistic submission, this needs no settling delay.
-            state.command_tty_check_after = Some(Instant::now());
+            // Keep the short settling delay set by `mark_command_started`.
+            // Some shells (fish 4.x) fire their preexec hook while their line
+            // editor still owns the tty in a raw/no-echo mode, then restore a
+            // cooked mode a moment later when they exec the command. Checking
+            // the tty discipline immediately would misread that transient raw
+            // mode as the child requesting direct input and route the next
+            // queued keystrokes to the shell instead of the panel.
         }
         osc133::Event::CommandEnd { exit_code } => {
             state.shell_state = ShellState::AtPrompt;

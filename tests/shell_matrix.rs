@@ -179,7 +179,7 @@ fn queue_lifecycle(shell: &str) {
         return;
     };
     s.command("sh -c 'sleep 2; exit 7'");
-    s.expect(b"\x1b]133;C");
+    s.expect(b"\x1b]133;C;cmdq=1");
     s.send(b"printf skipped > skipped\t\r");
     s.send(b"printf dispatched > dispatched\r");
     s.expect_file("dispatched", "dispatched");
@@ -187,11 +187,11 @@ fn queue_lifecycle(shell: &str) {
         !s.file("skipped").exists(),
         "conditional command ran after failure"
     );
-    s.expect(b"\x1b]133;D;7");
-    s.expect(b"\x1b]133;D;0");
+    s.expect(b"\x1b]133;D;7;cmdq=1");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
     s.drain(Duration::from_millis(100));
     s.command("sh -c 'sleep 2; exit 7'");
-    s.expect(b"\x1b]133;C");
+    s.expect(b"\x1b]133;C;cmdq=1");
     s.send(b"sh -c 'sleep 1; printf first > first'\r");
     s.send(b"sh -c 'test -f first && printf second > second'\t\r");
     s.expect_file("second", "second");
@@ -210,18 +210,18 @@ fn direct_input(shell: &str) {
     s.drain(Duration::from_millis(1750));
     s.send(b"private-answer\r");
     s.expect_file("answer", "private-answer");
-    s.expect(b"\x1b]133;D;0");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
     let queue = std::fs::read_to_string(s.file("data/cmdq/queue.json")).unwrap_or_default();
     assert!(!queue.contains("private-answer"));
     // A raw reader with no output also needs keys, including Ctrl-Q and Esc.
     s.command("sh -c 'stty raw -echo; head -c 2 > raw; stty sane'");
-    s.expect(b"\x1b]133;C");
+    s.expect(b"\x1b]133;C;cmdq=1");
     s.drain(Duration::from_millis(1750));
     s.send(b"\x11\x1b");
     s.expect_file("raw", "\x11\x1b");
-    s.expect(b"\x1b]133;D;0");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
     s.command("sh -c 'stty raw -echo; head -c 10 > keys; stty sane'");
-    s.expect(b"\x1b]133;C");
+    s.expect(b"\x1b]133;C;cmdq=1");
     s.drain(Duration::from_millis(250));
     s.send(b"\x1bOA\x1b[15;2~");
     s.expect_file("keys", "\x1bOA\x1b[15;2~");
@@ -244,7 +244,7 @@ fn real_programs(shell: &str) {
     s.drain(Duration::from_millis(100));
     s.send(b":wq\r");
     s.expect_file("edited", "hello from vim\n");
-    s.expect(b"\x1b]133;D;0");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
     std::fs::write(
         s.file("long-file"),
         (0..150).map(|n| format!("line {n}\n")).collect::<String>(),
@@ -254,14 +254,14 @@ fn real_programs(shell: &str) {
     s.expect(b"line 0");
     s.drain(Duration::from_millis(1750));
     s.send(b" q");
-    s.expect(b"\x1b]133;D;0");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
     std::fs::write(s.file("before"), "old\n".repeat(150)).unwrap();
     std::fs::write(s.file("after"), "new\n".repeat(150)).unwrap();
     s.command("env GIT_PAGER='less -+F' git --paginate diff --no-index before after");
     s.expect(b"diff --git");
     s.drain(Duration::from_millis(1750));
     s.send(b"q");
-    s.expect(b"\x1b]133;D;1");
+    s.expect(b"\x1b]133;D;1;cmdq=1");
     s.command("printf recovered > recovered");
     s.expect_file("recovered", "recovered");
 }
@@ -303,7 +303,7 @@ fn zsh_rc_top_level_typeset_survives_the_startup_shim() {
     };
     s.command("print -r -- MARK-${path[-1]}-$(( $+functions[add-zsh-hook] ))");
     s.expect(b"MARK-/cmdq-matrix-bin-1");
-    s.expect(b"\x1b]133;D;0");
+    s.expect(b"\x1b]133;D;0;cmdq=1");
     assert!(
         !s.output
             .windows(b"function definition file not found".len())
@@ -380,10 +380,10 @@ fn continuous_output_can_be_interrupted() {
         return;
     };
     s.command("yes");
-    s.expect(b"\x1b]133;C");
+    s.expect(b"\x1b]133;C;cmdq=1");
     s.drain(Duration::from_millis(250));
     s.send(b"\x03");
-    s.expect(b"\x1b]133;D;130");
+    s.expect(b"\x1b]133;D;130;cmdq=1");
     s.command("printf usable > usable");
     s.expect_file("usable", "usable");
 }

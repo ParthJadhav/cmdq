@@ -60,6 +60,10 @@ jobs:
       - name: Test
         env:
           CMDQ_REQUIRE_SHELL_MATRIX: "1"
+          # Ubuntu's /etc/zsh/zshrc runs compinit globally, and the runner
+          # image has group-writable fpath entries, so every zsh session would
+          # stall at the "insecure directories" prompt.
+          skip_global_compinit: "1"
         run: cargo test --verbose
 
   docs:
