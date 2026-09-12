@@ -45,6 +45,10 @@ pub struct PanelState<'a> {
     pub input_buffer: &'a str,
     pub input_cursor: usize,
     pub editing_index: Option<usize>,
+    pub conditional: bool,
+    pub shell_input: bool,
+    pub activity: Option<&'a str>,
+    pub can_recover: bool,
     pub status: &'a str,
     pub pending_quit: bool,
     pub pending_clear: bool,
@@ -52,9 +56,54 @@ pub struct PanelState<'a> {
     pub max_queue_visible: u16,
 }
 
+/// The queue itself confirms routine actions. Only actionable feedback needs a row.
+fn panel_notice<'a>(view: &'a PanelState<'_>) -> Option<&'a str> {
+    // These states are already explained by the header or confirmation hint.
+    if view.queue.paused
+        && !view.shell_input
+        && !view.passthrough_to_child
+        && !view.child_input_prompt
+        && view.editing_index.is_none()
+        && matches!(
+            view.status,
+            "queue paused" | "queue paused by another session"
+        )
+    {
+        return view.activity;
+    }
+    if view.pending_clear || view.pending_quit {
+        return None;
+    }
+    let routine = [
+        "added:",
+        "saved:",
+        "dispatched:",
+        "queue resumed",
+        "Building queue",
+        "Typing into",
+        "alt-screen",
+        "mouse tracking",
+        "edit cancelled",
+    ]
+    .iter()
+    .any(|prefix| view.status.starts_with(prefix));
+    let outcome_in_activity = view.activity.is_some()
+        && (view.status.starts_with("removed:")
+            || matches!(view.status, "queue cleared" | "restored to paused queue"));
+    if !view.status.is_empty() && !routine && !outcome_in_activity {
+        Some(view.status)
+    } else {
+        view.activity
+    }
+}
+
+fn notice_rows(view: &PanelState<'_>, height: u16) -> u16 {
+    u16::from(height >= 4 && panel_notice(view).is_some())
+}
+
 /// Compute how many rows the panel needs given the current state.
 ///
-/// Layout:  header(1) + queue rows + input(1) + hints(1).
+/// Layout:  header(1) + hints(1) + queue rows + input(1).
 ///
 /// When help is open, the panel expands to fill most of the screen.
 pub fn panel_height(view: &PanelState<'_>, total_rows: u16) -> u16 {
@@ -64,7 +113,7 @@ pub fn panel_height(view: &PanelState<'_>, total_rows: u16) -> u16 {
         return total_rows.saturating_sub(2).min(HELP_MAX_ROWS);
     }
     let n = (view.queue.len() as u16).min(view.max_queue_visible);
-    1 + n + 1 + 1
+    1 + n + 1 + 1 + u16::from(panel_notice(view).is_some())
 }
 
 /// Number of physical rows occupied by the currently painted panel after a
@@ -90,7 +139,14 @@ pub fn reflowed_panel_height(
     let mut widths = Vec::with_capacity(panel_height as usize);
     widths.push(old_cols.max(1) as usize); // divider-filled header
 
-    let list_capacity = panel_height.saturating_sub(3) as usize;
+    let mut hints = Vec::new();
+    if paint_hints(&mut hints, view, old_cols).is_ok() {
+        widths.push(ansi_display_width(&hints));
+    } else {
+        widths.push(old_cols as usize);
+    }
+
+    let list_capacity = panel_height.saturating_sub(3 + notice_rows(view, panel_height)) as usize;
     let queue_start = queue_window_start(view, list_capacity);
     for (i, item) in view
         .queue
@@ -101,34 +157,20 @@ pub fn reflowed_panel_height(
         .take(list_capacity)
         .take(view.max_queue_visible as usize)
     {
-        let prefix = if view.editing_index == Some(i) {
-            " ✎ "
-        } else if i == 0 {
-            " ▸ "
-        } else {
-            "   "
-        };
-        let cond = if item.conditional { "↪ " } else { "  " };
-        let text = format!("{prefix}{cond}{}", display_control_chars(&item.command));
+        let text = queue_row_text(view, i, item);
         widths.push(display_width(&clip_to_width(&text, old_cols as usize)));
     }
-    while widths.len() < 1 + list_capacity {
+    while widths.len() < 2 + list_capacity {
         widths.push(0);
     }
 
-    let prompt = input_prompt_prefix(view);
-    let remaining = (old_cols as usize).saturating_sub(display_width(prompt));
-    let (display_input, display_cursor) =
-        display_control_chars_with_cursor(view.input_buffer, view.input_cursor);
-    let (visible_input, _) = input_window(&display_input, display_cursor, remaining);
-    widths.push(display_width(prompt) + display_width(&visible_input));
-
-    let mut hints = Vec::new();
-    if paint_hints(&mut hints, view, old_cols).is_ok() {
-        widths.push(ansi_display_width(&hints));
-    } else {
-        widths.push(old_cols as usize);
+    if let Some(activity) = panel_notice(view).filter(|_| notice_rows(view, panel_height) > 0) {
+        widths.push(display_width(&clip_to_width(
+            &display_control_chars(activity),
+            old_cols as usize,
+        )));
     }
+    widths.push(display_width(&input_line(view, old_cols as usize).0));
 
     widths
         .into_iter()
@@ -271,17 +313,9 @@ pub fn paint(
     //  * cursor_in_input → put it where the user is editing.
     //  * else            → restore the shell cursor by absolute position.
     if cursor_in_input && !view.show_help {
-        let prompt = input_prompt_prefix(view);
-        let input_row = top + panel_height.saturating_sub(2);
-        let remaining = (total_cols as usize).saturating_sub(display_width(prompt));
-        let (display_input, display_cursor) =
-            display_control_chars_with_cursor(view.input_buffer, view.input_cursor);
-        let (_, input_cursor_col) = input_window(&display_input, display_cursor, remaining);
-        // Cursor sits after the prompt + the visual cursor offset within
-        // the input buffer. Clamp to viewport width.
-        let col = (display_width(prompt) as u16)
-            .saturating_add(input_cursor_col as u16)
-            .min(total_cols.saturating_sub(1));
+        let input_row = top + panel_height.saturating_sub(1);
+        let (_, cursor_col) = input_line(view, total_cols as usize);
+        let col = (cursor_col as u16).min(total_cols.saturating_sub(1));
         out.queue(MoveTo(col, input_row))?;
         out.queue(Show)?;
     } else {
@@ -296,7 +330,7 @@ pub fn paint(
     out.flush()
 }
 
-/// Standard panel layout: header / queue rows / input / hints.
+/// Standard panel layout: header / hints / queue rows / input.
 fn paint_normal(
     out: &mut impl Write,
     view: &PanelState<'_>,
@@ -306,15 +340,18 @@ fn paint_normal(
 ) -> io::Result<()> {
     let mut row = top;
 
-    // Header: dim divider that fills the row, optionally embedding the
-    // current status message.
+    // State lives in the header; actionable feedback has a single notice row.
     // Queue list. Reserve `panel_height - 3` rows for items (header(1) +
     // input(1) + hints(1) accounted for).
-    let list_capacity = panel_height.saturating_sub(3) as usize;
+    let list_capacity = panel_height.saturating_sub(3 + notice_rows(view, panel_height)) as usize;
 
     out.queue(MoveTo(0, row))?;
     out.queue(Clear(ClearType::CurrentLine))?;
     paint_header(out, view, total_cols, list_capacity)?;
+    row += 1;
+    out.queue(MoveTo(0, row))?;
+    out.queue(Clear(ClearType::CurrentLine))?;
+    paint_hints(out, view, total_cols)?;
     row += 1;
     let queue_start = queue_window_start(view, list_capacity);
     for (i, item) in view
@@ -328,65 +365,65 @@ fn paint_normal(
     {
         out.queue(MoveTo(0, row))?;
         out.queue(Clear(ClearType::CurrentLine))?;
-        let prefix = if view.editing_index == Some(i) {
-            " ✎ "
-        } else if i == 0 {
-            " ▸ "
-        } else {
-            "   "
-        };
-        let cond = if item.conditional { "↪ " } else { "  " };
-        let style_color = if i == 0 {
-            Color::Yellow
-        } else if item.conditional {
+        let selected = view.editing_index == Some(i);
+        out.queue(SetForegroundColor(if selected {
             Color::Cyan
+        } else if i == 0 {
+            Color::White
         } else {
             Color::Grey
-        };
-        out.queue(SetForegroundColor(style_color))?;
-        if i == 0 {
+        }))?;
+        if selected || i == 0 {
             out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
         }
-        let text = format!("{prefix}{cond}{}", display_control_chars(&item.command));
+        let text = queue_row_text(view, i, item);
         out.queue(Print(clip_to_width(&text, total_cols as usize)))?;
         out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
         out.queue(ResetColor)?;
         row += 1;
     }
 
-    // Pad blank queue rows so the input / hints land in a stable place
+    // Pad blank queue rows so the input lands in a stable place
     // regardless of queue length.
-    while row < top + panel_height - 2 {
+    while row < top + panel_height - 1 - notice_rows(view, panel_height) {
         out.queue(MoveTo(0, row))?;
         out.queue(Clear(ClearType::CurrentLine))?;
         row += 1;
     }
 
-    // Input line.
-    out.queue(MoveTo(0, row))?;
-    out.queue(Clear(ClearType::CurrentLine))?;
-    let prompt = input_prompt_prefix(view);
-    let prompt_color = if view.passthrough_to_child {
-        Color::Red
-    } else {
-        Color::Green
-    };
-    out.queue(SetForegroundColor(prompt_color))?;
-    out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
-    out.queue(Print(prompt))?;
-    out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
-    out.queue(ResetColor)?;
-    let remaining = (total_cols as usize).saturating_sub(display_width(prompt));
-    let (display_input, display_cursor) =
-        display_control_chars_with_cursor(view.input_buffer, view.input_cursor);
-    let (visible_input, _) = input_window(&display_input, display_cursor, remaining);
-    out.queue(Print(visible_input))?;
-    row += 1;
+    if let Some(activity) = panel_notice(view).filter(|_| notice_rows(view, panel_height) > 0) {
+        out.queue(MoveTo(0, row))?;
+        out.queue(Clear(ClearType::CurrentLine))?;
+        out.queue(SetForegroundColor(Color::Yellow))?;
+        out.queue(Print(clip_to_width(
+            &display_control_chars(activity),
+            total_cols as usize,
+        )))?;
+        out.queue(ResetColor)?;
+        row += 1;
+    }
 
-    // Hints line.
     out.queue(MoveTo(0, row))?;
     out.queue(Clear(ClearType::CurrentLine))?;
-    paint_hints(out, view, total_cols)?;
+    let (line, _) = input_line(view, total_cols as usize);
+    let typing_above = view.passthrough_to_child || view.shell_input || view.child_input_prompt;
+    if typing_above {
+        out.queue(SetForegroundColor(Color::Grey))?;
+        out.queue(Print(line))?;
+    } else {
+        let prefix = input_prefix(view, total_cols as usize);
+        out.queue(SetForegroundColor(Color::Cyan))?;
+        out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
+        out.queue(Print(&prefix))?;
+        out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
+        if view.input_buffer.is_empty() {
+            out.queue(SetForegroundColor(Color::DarkGrey))?;
+        } else {
+            out.queue(ResetColor)?;
+        }
+        out.queue(Print(&line[prefix.len()..]))?;
+    }
+    out.queue(ResetColor)?;
 
     Ok(())
 }
@@ -422,24 +459,43 @@ fn paint_header(
     total_cols: u16,
     list_capacity: usize,
 ) -> io::Result<()> {
-    let mut header = String::from(" cmdq");
-    // Without this the list silently truncates and the user has no idea
-    // more commands are waiting below the fold.
+    let state = if view.passthrough_to_child || view.child_input_prompt || view.shell_input {
+        "↑"
+    } else if view.editing_index.is_some() {
+        "✎"
+    } else if view.queue.paused {
+        "Paused"
+    } else if view.force_queue && !view.running {
+        "○"
+    } else if view.running {
+        "▶"
+    } else {
+        "✓"
+    };
+    let mut header = format!(" {state} ");
     if let Some((first, last, total)) = queue_overflow(view, list_capacity) {
-        header.push_str(&format!(" · {total} queued, showing {first}–{last}"));
+        if first > 1 {
+            header.push_str("↑ ");
+        }
+        if last < total {
+            header.push_str("↓ ");
+        }
     }
-    if !view.status.is_empty() {
-        header.push_str(&format!(" │ {}", display_control_chars(view.status)));
-    }
-    header.push(' ');
     let header_width = display_width(&header);
     let cols = total_cols as usize;
-    out.queue(SetForegroundColor(Color::DarkGrey))?;
+    out.queue(SetForegroundColor(if view.queue.paused {
+        Color::Yellow
+    } else if view.running || view.editing_index.is_some() {
+        Color::Cyan
+    } else {
+        Color::Grey
+    }))?;
     if header_width >= cols {
         out.queue(Print(clip_to_width(&header, cols)))?;
     } else {
         out.queue(Print(header))?;
         let pad = cols - header_width;
+        out.queue(SetForegroundColor(Color::DarkGrey))?;
         out.queue(Print("─".repeat(pad)))?;
     }
     out.queue(ResetColor)?;
@@ -447,184 +503,202 @@ fn paint_header(
 }
 
 fn paint_hints(out: &mut impl Write, view: &PanelState<'_>, total_cols: u16) -> io::Result<()> {
-    let pause_label = if view.queue.paused { "resume" } else { "pause" };
-    if total_cols < 88 {
-        let pause_chip = format!("[^X {pause_label}]");
-        let chips: Vec<&str> = if view.pending_quit {
-            vec!["[^D again to quit]"]
-        } else if view.pending_clear {
-            vec!["[^K again to clear queue]"]
-        } else if view.editing_index.is_some() {
-            vec![
-                "[Esc cancel]",
-                "[Enter save]",
-                "[^D delete]",
-                "[Alt-Up/Down reorder]",
-                "[Tab chain]",
-            ]
-        } else if view.child_input_prompt {
-            vec![
-                "[keys -> child]",
-                "[Enter submit]",
-                "[^C interrupt]",
-                "[F1 help]",
-            ]
-        } else if view.passthrough_to_child {
-            vec!["[keys -> child]", "[Esc Esc / ^\\ exit raw]"]
+    // Order shortcuts by relevance. Wider terminals expose more controls;
+    // narrow terminals retain the primary action and Help without wrapping.
+    let actions = if view.pending_quit {
+        vec![("Ctrl-D", "Quit (press again)")]
+    } else if view.pending_clear {
+        vec![("Ctrl-K", "Clear (press again)")]
+    } else if view.passthrough_to_child || view.child_input_prompt {
+        vec![("F2", "↓ Type here"), ("Ctrl-C", "Stop")]
+    } else if view.shell_input {
+        let mut actions = vec![("Ctrl-Q", "↓ Type here")];
+        if view.can_recover {
+            actions.push(("Alt-U", "Undo"));
+        }
+        actions.push(("F3", "Hide"));
+        actions
+    } else {
+        let mut actions = Vec::new();
+        if view.editing_index.is_some() {
+            actions.extend([("↵", "Save"), ("Esc", "Cancel"), ("↑/↓", "Select")]);
+            actions.extend([("Alt-↑/↓", "Move"), ("Ctrl-D", "Delete")]);
         } else {
-            vec![
-                "[Enter add]",
-                "[Up edit]",
-                "[Tab chain]",
-                &pause_chip,
-                "[^K clear]",
-                if view.running {
-                    "[^\\ SIGQUIT]"
-                } else {
-                    "[Esc Esc raw]"
-                },
-                "[? help]",
-            ]
+            if view.queue.paused {
+                actions.push(("Ctrl-X", "Resume"));
+            } else if view.force_queue && !view.running && !view.queue.is_empty() {
+                actions.push(("Ctrl-X", "Start"));
+            } else if !view.queue.is_empty() {
+                actions.push(("Ctrl-X", "Pause"));
+            }
+            if view.running {
+                actions.push(("F2", "↑ Type above"));
+            } else {
+                if !view.queue.paused && !view.force_queue {
+                    actions.push((
+                        "↵",
+                        if view.conditional {
+                            "Run if success"
+                        } else {
+                            "Run"
+                        },
+                    ));
+                }
+                actions.push(("Ctrl-Q", "↑ Type above"));
+            }
+            if !view.queue.is_empty() {
+                actions.extend([("↑/↓", "Edit"), ("Ctrl-K", "Clear")]);
+            }
+        }
+        if view.can_recover {
+            actions.push(("Alt-U", "Undo"));
+        }
+        if view.running {
+            actions.push(("Ctrl-C", "Stop"));
+        }
+        actions.push((
+            "Alt-S",
+            if view.conditional {
+                "Always"
+            } else {
+                "If success"
+            },
+        ));
+        if !view.input_buffer.is_empty() && view.editing_index.is_none() {
+            actions.push(("Esc", "Cancel"));
+        }
+        actions
+    };
+    let inset = usize::from(total_cols > 2);
+    let width = (total_cols as usize).saturating_sub(inset * 2);
+    let help = ("F1", "Help");
+    let hint_width = |(key, label): (&str, &str)| display_width(key) + 1 + display_width(label);
+    let gap = 3;
+    let mut fitted = Vec::new();
+    let mut used = 0;
+    // Reserve Help before adding secondary actions. Never cut a shortcut in half.
+    let help_budget = if view.pending_quit || view.pending_clear {
+        0
+    } else {
+        hint_width(help) + gap
+    };
+    for action in actions {
+        let needed = hint_width(action) + if fitted.is_empty() { 0 } else { gap };
+        if used + needed + help_budget <= width {
+            used += needed;
+            fitted.push(action);
+        }
+    }
+    if help_budget > 0
+        && used
+            + if fitted.is_empty() {
+                hint_width(help)
+            } else {
+                help_budget
+            }
+            <= width
+    {
+        fitted.push(help);
+    }
+    if inset > 0 {
+        out.queue(Print(" "))?;
+    }
+    // A very narrow terminal may only fit the confirmation key; keep it usable.
+    if fitted.is_empty() && (view.pending_quit || view.pending_clear) {
+        let key = if view.pending_quit {
+            "Ctrl-D"
+        } else {
+            "Ctrl-K"
         };
+        out.queue(Print(clip_to_width(&format!("{key} again"), width)))?;
+    }
+    let mut painted = 0;
+    for (index, &(key, label)) in fitted.iter().enumerate() {
+        let spacing = if (key, label) == help {
+            width.saturating_sub(painted + hint_width(help))
+        } else if index > 0 {
+            gap
+        } else {
+            0
+        };
+        out.queue(Print(" ".repeat(spacing)))?;
+        painted += spacing;
+        out.queue(SetForegroundColor(if index == 0 && (key, label) != help {
+            Color::Cyan
+        } else {
+            Color::Grey
+        }))?;
+        out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
+        out.queue(Print(key))?;
+        out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
         out.queue(SetForegroundColor(Color::Grey))?;
-        out.queue(Print(fit_chips(&chips, total_cols as usize)))?;
-        out.queue(ResetColor)?;
-        return Ok(());
+        out.queue(Print(format!(" {label}")))?;
+        painted += hint_width((key, label));
     }
-
-    out.queue(Print(" "))?;
-    if view.pending_quit {
-        chip(out, "^D", "again to quit")?;
-        sep(out)?;
-        out.queue(SetForegroundColor(Color::Grey))?;
-        out.queue(Print("any other key keeps working"))?;
-        out.queue(ResetColor)?;
-        return Ok(());
-    }
-    if view.pending_clear {
-        chip(out, "^K", "again to clear the queue")?;
-        sep(out)?;
-        out.queue(SetForegroundColor(Color::Grey))?;
-        out.queue(Print("any other key keeps it"))?;
-        out.queue(ResetColor)?;
-        return Ok(());
-    }
-    if view.editing_index.is_some() {
-        chip(out, "Esc", "cancel")?;
-        gap(out)?;
-        chip(out, "⏎", "save")?;
-        gap(out)?;
-        chip(out, "^D", "delete")?;
-        gap(out)?;
-        chip(out, "Alt-↑↓", "reorder")?;
-        gap(out)?;
-        chip(out, "⇥", "chain")?;
-        return Ok(());
-    }
-
-    if view.child_input_prompt {
-        chip(out, "keys", "to child")?;
-        gap(out)?;
-        chip(out, "⏎", "submit")?;
-        gap(out)?;
-        chip(out, "^C", "interrupt")?;
-        sep(out)?;
-        chip(out, "F1", "help")?;
-        return Ok(());
-    }
-
-    if view.passthrough_to_child {
-        chip(out, "keys", "to child")?;
-        sep(out)?;
-        chip(out, "Esc Esc", "exit raw")?;
-        gap(out)?;
-        chip(out, "^\\", "exit raw")?;
-        return Ok(());
-    }
-
-    chip(out, "⏎", "add")?;
-    gap(out)?;
-    chip(out, "↑", "edit")?;
-    gap(out)?;
-    chip(out, "⇥", "chain")?;
-    sep(out)?;
-    chip(out, "^X", pause_label)?;
-    gap(out)?;
-    chip(out, "^K", "clear")?;
-    gap(out)?;
-    if view.running {
-        chip(out, "^\\", "SIGQUIT")?;
-    } else {
-        chip(out, "Esc Esc", "raw")?;
-    }
-    sep(out)?;
-    chip(out, "?", "help")?;
-    Ok(())
-}
-
-/// Join as many whole chips as fit in `width`, so a narrow terminal drops
-/// trailing hints instead of cutting one in half.
-fn fit_chips(chips: &[&str], width: usize) -> String {
-    let mut line = String::new();
-    for chip in chips {
-        let needed = display_width(&line) + usize::from(!line.is_empty()) + display_width(chip);
-        if needed > width {
-            break;
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(chip);
-    }
-    if line.is_empty() {
-        return clip_to_width(chips.first().copied().unwrap_or(""), width);
-    }
-    line
-}
-
-fn chip(out: &mut impl Write, key: &str, label: &str) -> io::Result<()> {
-    out.queue(SetForegroundColor(Color::DarkGrey))?;
-    out.queue(Print("["))?;
-    out.queue(SetForegroundColor(Color::Cyan))?;
-    out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
-    out.queue(Print(key))?;
-    out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
-    out.queue(SetForegroundColor(Color::Grey))?;
-    out.queue(Print(format!(" {label}")))?;
-    out.queue(SetForegroundColor(Color::DarkGrey))?;
-    out.queue(Print("]"))?;
     out.queue(ResetColor)?;
     Ok(())
 }
 
-fn sep(out: &mut impl Write) -> io::Result<()> {
-    out.queue(SetForegroundColor(Color::DarkGrey))?;
-    out.queue(Print("  ·  "))?;
-    out.queue(ResetColor)?;
-    Ok(())
-}
-
-fn gap(out: &mut impl Write) -> io::Result<()> {
-    out.queue(Print(" "))?;
-    Ok(())
-}
-
-fn input_prompt_prefix(view: &PanelState<'_>) -> &'static str {
-    if view.child_input_prompt {
-        "child input> "
-    } else if view.passthrough_to_child {
-        "raw input> "
-    } else if view.editing_index.is_some() {
-        "edit> "
-    } else if view.queue.paused && view.force_queue {
-        "force-queue (paused)> "
-    } else if view.queue.paused {
-        "queue (paused)> "
-    } else if view.force_queue {
-        "force-queue> "
+fn queue_row_text(view: &PanelState<'_>, index: usize, item: &crate::queue::QueueItem) -> String {
+    let label = if view.editing_index == Some(index) {
+        " ✎  "
+    } else if index == 0 {
+        " ›  "
     } else {
-        "queue> "
+        " ·  "
+    };
+    let condition = if item.conditional {
+        "[if success] "
+    } else {
+        ""
+    };
+    format!("{label}{condition}{}", display_control_chars(&item.command))
+}
+
+/// Keep the draft and queued command text aligned, with a distinct editing marker.
+fn input_prefix(view: &PanelState<'_>, cols: usize) -> String {
+    let mut prompt = if view.editing_index.is_some() {
+        " ✎  ".to_string()
+    } else {
+        " ❯  ".to_string()
+    };
+    if view.conditional {
+        prompt.push_str("if success ");
     }
+    // On narrow terminals, keep space for the actual command and cursor.
+    let prompt = if display_width(&prompt) + 8 > cols {
+        if view.conditional {
+            "if success ❯ ".to_string()
+        } else {
+            "❯ ".to_string()
+        }
+    } else {
+        prompt
+    };
+    clip_to_width(&prompt, cols.saturating_sub(1))
+}
+
+/// Shared by painting, cursor placement and resize cleanup.
+fn input_line(view: &PanelState<'_>, cols: usize) -> (String, usize) {
+    if view.shell_input || view.passthrough_to_child || view.child_input_prompt {
+        let text = if view.input_buffer.is_empty() {
+            " ↑ Typing above"
+        } else {
+            " ↑ Typing above · draft saved"
+        };
+        return (clip_to_width(text, cols), 0);
+    }
+    let prompt = input_prefix(view, cols);
+    let prefix_width = display_width(&prompt);
+    let (display, cursor) = display_control_chars_with_cursor(view.input_buffer, view.input_cursor);
+    let remaining = cols.saturating_sub(prefix_width);
+    let (text, offset) = input_window(&display, cursor, remaining);
+    let text = if view.input_buffer.is_empty() {
+        clip_to_width("Next command…", remaining)
+    } else {
+        text
+    };
+    (format!("{prompt}{text}"), prefix_width + offset)
 }
 
 /// In-panel help: a tall list of shortcuts. When help is shown the panel
@@ -641,103 +715,39 @@ fn paint_help(
     out.queue(Clear(ClearType::CurrentLine))?;
     out.queue(SetForegroundColor(Color::Yellow))?;
     out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
-    out.queue(Print(" cmdq · keyboard shortcuts "))?;
+    out.queue(Print(clip_to_width(
+        " cmdq · keyboard shortcuts ",
+        total_cols as usize,
+    )))?;
     out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
     out.queue(SetForegroundColor(Color::DarkGrey))?;
     let pad = (total_cols as usize).saturating_sub(" cmdq · keyboard shortcuts ".chars().count());
     out.queue(Print("─".repeat(pad)))?;
     out.queue(ResetColor)?;
 
-    // The full layout fits in HELP_MAX_ROWS = 29 lines including the title.
-    // A compact layout keeps every essential shortcut visible in a standard
-    // 24-row terminal (21 content rows after leaving shell context + title).
-    let full_lines: &[(&str, &str)] = &[
-        (
-            "",
-            "panel appears 1.5s into a long command. ↑ recalls the QUEUE.",
-        ),
-        ("add to queue", ""),
-        ("Enter", "add the typed command to the queue"),
-        ("Tab", "chain — only run if previous succeeded"),
-        ("Esc", "clear the input buffer"),
-        ("", ""),
-        ("edit a queued item", ""),
-        ("↑ / ↓", "open previous / next queued item for edit"),
-        ("Enter", "save the edit"),
-        ("Esc", "cancel the edit (item unchanged)"),
-        ("Ctrl-D", "delete the item being edited"),
-        ("Alt-↑ / Alt-↓", "reorder the item being edited"),
-        ("", ""),
-        ("queue control", ""),
-        ("Ctrl-X", "pause / resume auto-dispatch"),
-        ("Ctrl-K", "clear the queue (press twice to confirm)"),
-        ("", ""),
-        ("modes", ""),
-        ("Ctrl-Q", "force the panel open at the shell prompt"),
-        ("Esc Esc", "raw input — keys go to the running app"),
-        ("Ctrl-\\", "SIGQUIT running command · exits raw input"),
-        ("", ""),
-        ("misc", ""),
-        ("Ctrl-C", "SIGINT the running command (pauses queue)"),
-        ("Ctrl-Z", "suspend the running command"),
-        ("Ctrl-D", "quit cmdq (twice if queue is non-empty)"),
-        ("Ctrl/Alt edit keys", "line movement, backspace, word-jump"),
-        ("F1 / ?", "show this help · Esc / Enter dismisses"),
+    let lines: &[(&str, &str)] = &[
+        ("▶ running · ○ not started · ✎ editing", ""),
+        ("Enter", "queue command; run at prompt; save when editing"),
+        ("Ctrl-X", "pause / resume / start"),
+        ("Ctrl-Q", "open queue / return to shell"),
+        ("Alt-U", "restore removed or skipped commands, paused"),
+        ("F3", "dismiss notice"),
+        ("Ctrl-K twice", "clear queue"),
+        ("Edit", ""),
+        ("↑ / ↓", "select queued command"),
+        ("Esc", "cancel edit / clear draft"),
+        ("Alt-S", "toggle: always / if previous command succeeds"),
+        ("Ctrl-D (editing)", "remove command"),
+        ("Alt-↑ / Alt-↓", "reorder command"),
+        ("Terminal", ""),
+        ("F2", "type above / return to queue; keeps draft"),
+        ("Ctrl-C", "interrupt command; pause queue"),
+        ("Ctrl-Z", "suspend command"),
+        ("Ctrl-\\", "send SIGQUIT / return to queue"),
+        ("Ctrl-D", "quit; twice if queued; delete if draft has text"),
+        ("F1 / Esc / Enter", "close help"),
     ];
-
-    let compact_lines: &[(&str, &str)] = &[
-        ("add to queue", ""),
-        ("Enter", "add the typed command to the queue"),
-        ("Tab", "chain — only run if previous succeeded"),
-        ("Esc", "clear the input buffer"),
-        ("edit a queued item", ""),
-        ("↑ / ↓", "open previous / next queued item for edit"),
-        ("Enter", "save the edit"),
-        ("Esc", "cancel the edit (item unchanged)"),
-        ("Ctrl-D", "delete the item being edited"),
-        ("Alt-↑ / Alt-↓", "reorder the item being edited"),
-        ("queue control", ""),
-        ("Ctrl-X", "pause / resume auto-dispatch"),
-        ("Ctrl-K", "clear the queue (press twice to confirm)"),
-        ("modes", ""),
-        ("Ctrl-Q", "force the panel open at the shell prompt"),
-        ("Esc Esc", "raw input — keys go to the running app"),
-        ("Ctrl-\\", "SIGQUIT running command · exits raw input"),
-        ("misc", ""),
-        ("Ctrl-C", "SIGINT the running command (pauses queue)"),
-        ("Ctrl-D", "quit cmdq (twice if queue is non-empty)"),
-        ("F1 / ?", "show this help · Esc / Enter dismisses"),
-    ];
-
-    let small_lines: &[(&str, &str)] = &[
-        ("add to queue", ""),
-        ("Enter / Tab / Esc", "add / chain / clear input"),
-        ("edit queued item", ""),
-        ("↑ / ↓", "select previous / next queued item"),
-        ("Enter / Esc", "save / cancel edit"),
-        ("Ctrl-D", "delete edited item"),
-        ("Alt-↑ / Alt-↓", "reorder edited item"),
-        ("queue control", ""),
-        ("Ctrl-X / Ctrl-K", "pause or resume / clear queue"),
-        ("modes", ""),
-        ("Ctrl-Q", "force panel open at shell prompt"),
-        ("Esc Esc / Ctrl-\\", "raw input / SIGQUIT or exit raw"),
-        ("misc", ""),
-        (
-            "Ctrl-C / Ctrl-D",
-            "SIGINT + pause / quit (confirm if queued)",
-        ),
-        ("F1 / ?", "show help · Esc / Enter dismisses"),
-    ];
-
     let avail = panel_height.saturating_sub(1) as usize;
-    let lines = if avail >= full_lines.len() {
-        full_lines
-    } else if avail >= compact_lines.len() {
-        compact_lines
-    } else {
-        small_lines
-    };
     let visible = avail.min(lines.len());
     for i in 0..visible {
         // On very short terminals, always keep the dismissal hint visible
@@ -970,6 +980,10 @@ mod tests {
             input_buffer: "",
             input_cursor: 0,
             editing_index: None,
+            conditional: false,
+            shell_input: false,
+            activity: None,
+            can_recover: false,
             status: "",
             pending_quit: false,
             pending_clear: false,
@@ -1003,6 +1017,10 @@ mod tests {
             input_buffer: "",
             input_cursor: 0,
             editing_index: None,
+            conditional: false,
+            shell_input: false,
+            activity: None,
+            can_recover: false,
             status: "added: echo 界🙂",
             pending_quit: false,
             pending_clear: false,
@@ -1032,6 +1050,10 @@ mod tests {
             input_buffer: "",
             input_cursor: 0,
             editing_index: None,
+            conditional: false,
+            shell_input: false,
+            activity: None,
+            can_recover: false,
             status: "",
             pending_quit: false,
             pending_clear: false,
@@ -1050,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn hints_use_sigquit_label_for_running_commands() {
+    fn hints_prioritize_program_input_over_sigquit() {
         let queue = Queue::new();
         let view = PanelState {
             queue: &queue,
@@ -1061,6 +1083,10 @@ mod tests {
             input_buffer: "",
             input_cursor: 0,
             editing_index: None,
+            conditional: false,
+            shell_input: false,
+            activity: None,
+            can_recover: false,
             status: "",
             pending_quit: false,
             pending_clear: false,
@@ -1072,12 +1098,13 @@ mod tests {
         paint_hints(&mut out, &view, 100).unwrap();
 
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
-        assert!(printable.contains("SIGQUIT"), "hints={printable:?}");
+        assert!(printable.contains("F2 ↑ Type above"), "hints={printable:?}");
+        assert!(!printable.contains("SIGQUIT"), "hints={printable:?}");
         assert!(!printable.contains("raw"), "hints={printable:?}");
     }
 
     #[test]
-    fn hints_use_raw_toggle_label_when_prompt_owned() {
+    fn hints_offer_return_to_shell_when_building_queue() {
         let queue = Queue::new();
         let view = PanelState {
             queue: &queue,
@@ -1088,6 +1115,10 @@ mod tests {
             input_buffer: "",
             input_cursor: 0,
             editing_index: None,
+            conditional: false,
+            shell_input: false,
+            activity: None,
+            can_recover: false,
             status: "",
             pending_quit: false,
             pending_clear: false,
@@ -1099,8 +1130,10 @@ mod tests {
         paint_hints(&mut out, &view, 100).unwrap();
 
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
-        assert!(printable.contains("Esc Esc"), "hints={printable:?}");
-        assert!(printable.contains("raw"), "hints={printable:?}");
+        assert!(
+            printable.contains("Ctrl-Q ↑ Type above"),
+            "hints={printable:?}"
+        );
         assert!(!printable.contains("SIGQUIT"), "hints={printable:?}");
     }
 
@@ -1119,6 +1152,10 @@ mod tests {
             input_buffer: "",
             input_cursor: 0,
             editing_index: Some(11),
+            conditional: false,
+            shell_input: false,
+            activity: None,
+            can_recover: false,
             status: "",
             pending_quit: false,
             pending_clear: false,
@@ -1139,6 +1176,10 @@ mod tests {
             input_buffer: "",
             input_cursor: 0,
             editing_index: None,
+            conditional: false,
+            shell_input: false,
+            activity: None,
+            can_recover: false,
             status: "",
             pending_quit: false,
             pending_clear: false,
@@ -1158,7 +1199,7 @@ mod tests {
         paint_header(&mut out, &view, 100, 8).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
         assert!(
-            printable.contains("12 queued, showing 1–8"),
+            printable.starts_with(" ▶ ↓ ") && !printable.contains("12"),
             "header={printable:?}"
         );
 
@@ -1168,10 +1209,10 @@ mod tests {
         paint_header(&mut out, &view, 100, 8).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
         assert!(
-            printable.contains("12 queued, showing 5–12"),
+            printable.starts_with(" ✎ ↑ ") && !printable.contains("12"),
             "header={printable:?}"
         );
-        assert!(printable.contains("saved: cmd 11"), "header={printable:?}");
+        assert!(!printable.contains("saved: cmd 11"), "header={printable:?}");
     }
 
     #[test]
@@ -1182,11 +1223,14 @@ mod tests {
         let mut out = Vec::new();
         paint_header(&mut out, &view, 100, 8).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
-        assert!(!printable.contains("queued"), "header={printable:?}");
+        assert!(
+            !printable.contains("↓") && !printable.contains("↑"),
+            "header={printable:?}"
+        );
     }
 
     #[test]
-    fn narrow_hints_track_pause_state_and_offer_clear() {
+    fn narrow_hints_prioritize_resume_and_help() {
         let mut queue = Queue::new();
         queue.push("cmd", false);
         queue.paused = true;
@@ -1194,13 +1238,13 @@ mod tests {
         let mut out = Vec::new();
         paint_hints(&mut out, &view, 80).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
-        assert!(printable.contains("[^X resume]"), "hints={printable:?}");
-        assert!(printable.contains("[^K clear]"), "hints={printable:?}");
-        assert!(!printable.contains("pause"), "hints={printable:?}");
+        assert!(printable.contains("Ctrl-X Resume"), "hints={printable:?}");
+        assert!(printable.contains("F1 Help"), "hints={printable:?}");
+        assert!(!printable.contains("Ctrl-X Pause"), "hints={printable:?}");
     }
 
     #[test]
-    fn narrow_hints_drop_whole_chips_instead_of_cutting_one() {
+    fn narrow_hints_keep_whole_actions() {
         let queue = Queue::new();
         let view = view_with(&queue, true);
         for cols in [40u16, 52, 60, 70, 87] {
@@ -1211,9 +1255,10 @@ mod tests {
                 display_width(&printable) <= cols as usize,
                 "{cols}: {printable:?}"
             );
-            assert!(printable.ends_with(']'), "{cols}: {printable:?}");
+            assert!(printable.ends_with("F1 Help"), "{cols}: {printable:?}");
             assert!(
-                printable.starts_with("[Enter add]"),
+                printable.trim_start().starts_with("F2 ↑ Type above")
+                    && !printable.contains("Enter"),
                 "{cols}: {printable:?}"
             );
         }
@@ -1229,9 +1274,114 @@ mod tests {
             let mut out = Vec::new();
             paint_hints(&mut out, &view, cols).unwrap();
             let printable = strip_ansi(&String::from_utf8_lossy(&out));
-            assert!(printable.contains("^K"), "{cols}: {printable:?}");
+            assert!(printable.contains("Ctrl-K"), "{cols}: {printable:?}");
             assert!(printable.contains("again"), "{cols}: {printable:?}");
             assert!(!printable.contains("add"), "{cols}: {printable:?}");
+        }
+    }
+
+    #[test]
+    fn pause_is_explained_once_without_an_extra_notice_row() {
+        let mut queue = Queue::new();
+        queue.push("ls", false);
+        queue.paused = true;
+        let mut view = view_with(&queue, true);
+        view.status = "queue paused by another session";
+        let height = panel_height(&view, 30);
+        assert_eq!(height, 4);
+        let mut out = Vec::new();
+        paint(&mut out, &view, height, 30, 120, true, (0, 0)).unwrap();
+        let rendered = strip_ansi(&String::from_utf8_lossy(&out));
+        assert_eq!(rendered.matches("Paused").count(), 1);
+        assert!(!rendered.contains("another session"));
+        assert!(rendered.contains("Ctrl-X Resume"));
+    }
+
+    #[test]
+    fn routine_feedback_is_quiet_but_errors_and_recovery_remain() {
+        let queue = Queue::new();
+        let mut view = view_with(&queue, true);
+        for status in ["added: ls", "saved: ls", "dispatched: ls", "queue resumed"] {
+            view.status = status;
+            assert_eq!(panel_height(&view, 30), 3);
+            assert!(panel_notice(&view).is_none());
+        }
+        view.status = "queue save failed: disk full";
+        assert_eq!(panel_notice(&view), Some(view.status));
+        let mut out = Vec::new();
+        paint(&mut out, &view, 4, 30, 80, true, (0, 0)).unwrap();
+        let rendered = strip_ansi(&String::from_utf8_lossy(&out));
+        assert_eq!(rendered.matches(view.status).count(), 1);
+        view.status = "queue cleared by another session";
+        assert_eq!(panel_notice(&view), Some(view.status));
+        view.status = "removed: ls";
+        view.activity = Some("Removed ls — Alt-U restores paused");
+        assert_eq!(panel_notice(&view), view.activity);
+    }
+
+    #[test]
+    fn wider_terminals_show_more_shortcuts_with_clear_labels() {
+        let mut queue = Queue::new();
+        queue.push("ls", false);
+        let view = view_with(&queue, true);
+        let mut narrow = Vec::new();
+        let mut wide = Vec::new();
+        paint_hints(&mut narrow, &view, 40).unwrap();
+        paint_hints(&mut wide, &view, 120).unwrap();
+        let narrow = strip_ansi(&String::from_utf8_lossy(&narrow));
+        let wide = strip_ansi(&String::from_utf8_lossy(&wide));
+        assert!(narrow.contains("Ctrl-X Pause"));
+        assert!(narrow.contains("F1 Help"));
+        for hint in [
+            "Ctrl-X Pause",
+            "↑/↓ Edit",
+            "Ctrl-K Clear",
+            "Ctrl-C Stop",
+            "Alt-S If success",
+            "F1 Help",
+        ] {
+            assert!(wide.contains(hint), "missing {hint}: {wide}");
+        }
+        assert!(wide.contains("Ctrl-K Clear") && !narrow.contains("Ctrl-K Clear"));
+        assert_eq!(display_width(&wide), 119);
+        assert_eq!(display_width(&narrow), 39);
+    }
+
+    #[test]
+    fn help_fits_a_standard_24_row_terminal() {
+        let queue = Queue::new();
+        let mut view = view_with(&queue, true);
+        view.show_help = true;
+        let mut out = Vec::new();
+        paint(
+            &mut out,
+            &view,
+            panel_height(&view, 24),
+            24,
+            80,
+            false,
+            (0, 0),
+        )
+        .unwrap();
+        let rendered = strip_ansi(&String::from_utf8_lossy(&out));
+        for control in ["Alt-S", "Alt-U", "Ctrl-D", "Ctrl-Z", "close help"] {
+            assert!(rendered.contains(control), "missing {control}");
+        }
+    }
+
+    #[test]
+    fn hints_fit_even_on_tiny_terminals() {
+        let mut queue = Queue::new();
+        queue.push("ls", false);
+        queue.paused = true;
+        let mut view = view_with(&queue, true);
+        for pending in [false, true] {
+            view.pending_clear = pending;
+            for cols in 1..=80 {
+                let mut out = Vec::new();
+                paint_hints(&mut out, &view, cols).unwrap();
+                assert!(ansi_display_width(&out) <= cols as usize);
+            }
         }
     }
 
@@ -1253,5 +1403,32 @@ mod tests {
             }
         }
         out
+    }
+    #[test]
+    fn execution_condition_and_edit_position_stay_visible() {
+        let mut q = Queue::new();
+        q.push("deploy", true);
+        let mut v = view_with(&q, true);
+        v.conditional = true;
+        v.editing_index = Some(0);
+        v.input_buffer = "deploy";
+        let (line, _) = input_line(&v, 100);
+        assert!(line.starts_with(" ✎  "));
+        assert!(line.contains("if success"));
+        assert!(queue_row_text(&v, 0, &q.items()[0]).contains("if success"));
+    }
+
+    #[test]
+    fn optional_notice_never_pushes_input_outside_tiny_panel() {
+        let q = Queue::new();
+        let mut v = view_with(&q, true);
+        v.activity = Some("Removed command");
+        for rows in [5, 6, 12, 24] {
+            let height = panel_height(&v, rows).min(rows - 2);
+            let mut out = Vec::new();
+            paint(&mut out, &v, height, rows, 24, true, (0, 0)).unwrap();
+            let rendered = String::from_utf8_lossy(&out);
+            assert!(!rendered.contains(&format!("\x1b[{};", rows + 1)));
+        }
     }
 }

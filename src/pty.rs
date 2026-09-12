@@ -164,10 +164,12 @@ impl ShellPty {
     pub fn needs_direct_input(&self) -> bool {
         #[cfg(unix)]
         {
-            use nix::sys::termios::LocalFlags;
+            use nix::libc::{ECHO, ICANON};
             self.master.get_termios().is_some_and(|termios| {
-                !termios.local_flags.contains(LocalFlags::ICANON)
-                    || !termios.local_flags.contains(LocalFlags::ECHO)
+                // portable-pty exposes flags from its own nix version. Compare
+                // the OS bits so dependency upgrades do not couple Rust types.
+                let flags = termios.local_flags.bits();
+                flags & ICANON == 0 || flags & ECHO == 0
             })
         }
         #[cfg(not(unix))]

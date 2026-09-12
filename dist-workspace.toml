@@ -7,6 +7,8 @@ members = ["cargo:."]
 cargo-dist-version = "0.28.7"
 # CI backends to support
 ci = "github"
+# Exercise release archives on PRs before a version tag can publish them.
+pr-run-mode = "upload"
 # The installers to generate for each app
 # (no powershell: cmdq depends on `nix` and is Unix-only)
 installers = ["shell", "homebrew"]
@@ -18,9 +20,8 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# We hand-edit release.yml to fix the publish-homebrew-formula auth bug
-# (persist-credentials: false strips the token before `git push`). Without
-# allow-dirty, `dist generate` would clobber that fix.
+# release.yml includes CI gates, archive/installer tests, and Homebrew auth.
+# Preserve these custom jobs when regenerating with cargo-dist.
 allow-dirty = ["ci"]
 # Homebrew tap (separate repo) where the auto-generated formula is pushed
 tap = "ParthJadhav/homebrew-tap"

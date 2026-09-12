@@ -6,6 +6,8 @@
 //! passthrough). Each test owns its full PTY setup so they can run in
 //! parallel without sharing state.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -15,13 +17,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 const SHELL_INTEGRATION_BASH: &str = include_str!("../shell/integration.bash");
 
 fn cmdq_binary_path() -> std::path::PathBuf {
-    if let Some(p) = option_env!("CARGO_BIN_EXE_cmdq") {
-        return std::path::PathBuf::from(p);
-    }
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("debug")
-        .join("cmdq")
+    common::cmdq_binary().into()
 }
 
 /// Spawn `cmdq` under bash with the project's OSC 133 integration sourced

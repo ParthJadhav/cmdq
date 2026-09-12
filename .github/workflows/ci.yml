@@ -5,17 +5,28 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_call:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  workflows:
+    name: Validate release workflows
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -23,65 +34,56 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test:
     name: test (${{ matrix.os }} / ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
         rust: [stable]
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             rust: "1.88"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
-      - name: Install shell and interactive-program test matrix (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y zsh fish dash vim less tmux
-      - name: Install shell and interactive-program test matrix (macOS)
-        if: runner.os == 'macOS'
-        run: brew install fish bash tmux
-      - name: Build
-        run: cargo build --verbose --all-targets
-      - name: Test
+      - uses: ./.github/actions/test-dependencies
+      - name: Test optimized binaries with real shells and PTYs
         env:
           CMDQ_REQUIRE_SHELL_MATRIX: "1"
-          # Ubuntu's /etc/zsh/zshrc runs compinit globally, and the runner
-          # image has group-writable fpath entries, so every zsh session would
-          # stall at the "insecure directories" prompt.
           skip_global_compinit: "1"
-        run: cargo test --verbose
+        run: cargo test --locked --release --all-features
 
   docs:
     name: docs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps --all-features
+      - run: cargo doc --locked --no-deps --all-features
 
   package:
-    name: cargo package (dry-run)
-    runs-on: ubuntu-latest
+    name: Verify packaged crate
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo package --no-verify
+      - run: cargo package --locked
