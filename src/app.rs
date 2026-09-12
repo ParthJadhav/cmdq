@@ -145,6 +145,9 @@ struct TerminalRestoreState {
 
 struct AppState {
     queue_supported: bool,
+    /// Readline can write back a stale PTY size while preparing Bash's prompt.
+    wait_for_bash_prompt: bool,
+    pending_bash_exit: Option<Option<i32>>,
     queue: Queue,
     editor: LineEditor,
     shell_state: ShellState,
@@ -725,6 +728,9 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
     let has_startup_status = startup_status.is_some();
     let mut state = AppState {
         queue_supported,
+        wait_for_bash_prompt: crate::shell_integration::ShellKind::detect_from_path(&shell)
+            == crate::shell_integration::ShellKind::Bash,
+        pending_bash_exit: None,
         queue,
         editor: LineEditor::new(),
         shell_state: ShellState::Unknown,
@@ -2154,6 +2160,16 @@ fn handle_osc_event(
     if !state.queue_supported {
         return Ok(());
     }
+    let bash_prompt_ready = state.wait_for_bash_prompt && matches!(event, osc133::Event::PromptEnd);
+    let event = if bash_prompt_ready {
+        let Some(exit_code) = state.pending_bash_exit.take() else {
+            // Resize redraws can repeat B; only a preceding D may dispatch.
+            return Ok(());
+        };
+        osc133::Event::CommandEnd { exit_code }
+    } else {
+        event
+    };
     match event {
         osc133::Event::PromptStart | osc133::Event::PromptEnd => {
             state.shell_state = ShellState::AtPrompt;
@@ -2179,6 +2195,10 @@ fn handle_osc_event(
             state.running_output_tail.clear();
             state.child_input_active = false;
             restore_child_terminal_modes_after_command(state, stdout, cleanup_state)?;
+            if state.wait_for_bash_prompt && !bash_prompt_ready {
+                state.pending_bash_exit = Some(exit_code);
+                return Ok(());
+            }
             if command_end_may_touch_queue(state, exit_code) {
                 transition_layout_recorded(
                     stdout,
@@ -2192,6 +2212,11 @@ fn handle_osc_event(
                 )?;
                 sync_cursor_tracker_for_layout(shell_cursor, *layout, term_cols, term_rows);
                 last_paint.force();
+            }
+            if bash_prompt_ready {
+                // Reassert even if already Hidden: readline's get/set-winsize
+                // pair can overwrite an earlier resize. B follows that pair.
+                resize_pty_for_layout(pty, *layout, term_cols, term_rows);
             }
             let dispatched = handle_command_end(state, exit_code, writer);
             if !dispatched
@@ -2390,6 +2415,9 @@ fn dispatch_next_eligible(
     prev_exit: Option<i32>,
     writer: &mut Box<dyn Write + Send>,
 ) -> bool {
+    if state.pending_bash_exit.is_some() {
+        return false;
+    }
     if let Some(queue_path) = state.queue_path.clone()
         && state.queue_dirty
     {
@@ -3958,6 +3986,8 @@ pub(crate) mod tests {
     fn make_state() -> AppState {
         AppState {
             queue_supported: true,
+            wait_for_bash_prompt: false,
+            pending_bash_exit: None,
             queue: Queue::new(),
             editor: LineEditor::new(),
             shell_state: ShellState::Running,

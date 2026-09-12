@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.3.0
+## 0.3.1
+
+Includes the unreleased 0.3.0 changes. CI blocked that candidate before publication.
 
 ### Added
 
@@ -24,6 +26,9 @@
 - Updated Rust dependencies and GitHub Actions, retaining Rust 1.88 support.
 
 ### Fixed
+
+- Wait for Bash to finish drawing its prompt before dispatching queued commands,
+  preventing readline from restoring a stale, reduced terminal height.
 
 - Split terminal control sequences remain intact even when a program or network
   pauses between fragments; panel rendering no longer corrupts delayed sequences.

@@ -3304,6 +3304,18 @@ fn corrupt_legacy_queue_is_ignored_and_left_untouched() {
 
 #[test]
 fn queued_command_after_visible_panel_sees_full_terminal_height() {
+    assert_queued_command_uses_full_height("");
+}
+
+#[test]
+fn bash_prompt_resize_cannot_shrink_queued_command() {
+    // Model readline writing a stale size while preparing the prompt.
+    assert_queued_command_uses_full_height(
+        "PROMPT_COMMAND='sleep 0.1; stty rows 26'\nPS1='bash> '\n",
+    );
+}
+
+fn assert_queued_command_uses_full_height(bashrc: &str) {
     if !std::path::Path::new("/bin/bash").exists() {
         return;
     }
@@ -3323,6 +3335,7 @@ fn queued_command_after_visible_panel_sees_full_terminal_height() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&xdg).unwrap();
 
+    std::fs::write(home.join(".bashrc"), bashrc).unwrap();
     let size_file = tmp.join("queued-size.txt");
     let pair = native_pty_system()
         .openpty(PtySize {

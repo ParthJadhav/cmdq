@@ -2,8 +2,8 @@
 # Adds prompt boundary markers so cmdq can detect when the shell is at a prompt
 # vs. running a command.
 
-if [[ -n "$CMDQ_ACTIVE" ]] && [[ "$CMDQ_INTEGRATION_LOADED" != 2 ]]; then
-    CMDQ_INTEGRATION_LOADED=2
+if [[ -n "$CMDQ_ACTIVE" ]] && [[ "$CMDQ_INTEGRATION_LOADED" != 3 ]]; then
+    CMDQ_INTEGRATION_LOADED=3
 
     read -r -d '' _CMDQ_INSTALL_DEBUG_TRAP <<'CMDQ_DEBUG_TRAP' || true
 if [[ -z "$_CMDQ_DEBUG_TRAP_INSTALLED" ]]; then
@@ -55,6 +55,11 @@ CMDQ_DEBUG_TRAP
 
     _cmdq_prompt_end() {
         local exit=${_CMDQ_LAST_STATUS:-$?}
+        # Readline has prepared the terminal when this nonprinting suffix is
+        # drawn. The host waits for B before resizing and dispatching a queue.
+        # Append after user prompt hooks; resize redraws remain idempotent.
+        local marker='\[\e]133;B;cmdq=1\a\]'
+        [[ "$PS1" == *"$marker" ]] || PS1+="$marker"
         unset _CMDQ_IN_PROMPT_COMMAND _CMDQ_LAST_STATUS
         return "$exit"
     }
