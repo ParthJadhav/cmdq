@@ -51,7 +51,7 @@ An ignored throughput benchmark is diagnostic, not a correctness gate.
 3. Open a release PR and wait for CI and the archive/installer checks to pass.
    Pull requests build and test artifacts without publishing them. Merge only
    after these checks pass.
-4. Tag the same commit, e.g. `git tag v0.3.2`, and push that tag.
+4. Tag the same commit, e.g. `git tag v0.3.3`, and push that tag.
 5. The release workflow reruns CI, builds all four archives, verifies their
    checksums, and runs the PTY suites against each **extracted release binary**.
    It also tests the generated shell installer and repeat installation using a

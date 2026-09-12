@@ -592,6 +592,41 @@ fn editor_bug_bash(shell: &str) {
 fn bash_editor_bug_bash() {
     editor_bug_bash("bash");
 }
+
+#[test]
+fn manually_started_queue_gets_full_terminal_size() {
+    for shell in ["bash", "zsh", "fish"] {
+        let Some(mut s) = Session::new(shell) else {
+            continue;
+        };
+        for attempt in 0..5 {
+            s.output.clear();
+            s.send(format!("\x11stty size > size-{attempt}\r").as_bytes());
+            s.expect(b"Start");
+            s.send(b"\x18");
+            let until = Instant::now() + Duration::from_secs(8);
+            let size = loop {
+                if let Ok(size) = std::fs::read_to_string(s.file(&format!("size-{attempt}")))
+                    && !size.trim().is_empty()
+                {
+                    break size;
+                }
+                assert!(
+                    Instant::now() < until,
+                    "{shell}: queued stty did not finish"
+                );
+                s.drain(Duration::from_millis(20));
+            };
+            assert_eq!(
+                size.trim(),
+                "30 100",
+                "{shell}: command inherited panel size"
+            );
+            s.expect(b"\x1b]133;D;0;cmdq=1");
+            s.drain(Duration::from_millis(150));
+        }
+    }
+}
 #[test]
 fn zsh_editor_bug_bash() {
     editor_bug_bash("zsh");
