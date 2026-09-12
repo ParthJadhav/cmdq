@@ -1258,6 +1258,28 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
                     let original = Some(terminal_input.event_bytes.as_slice());
                     #[cfg(not(unix))]
                     let original = None;
+                    if key_may_dispatch_queue(key, &state) {
+                        // Manual starts and idle drafts need the same ordering
+                        // as automatic dispatch: release/resize before sending
+                        // input, not while readline is consuming the command.
+                        transition_layout_recorded(
+                            &mut stdout,
+                            &mut layout,
+                            PanelLayout::Hidden,
+                            term_rows,
+                            term_cols,
+                            &mut pty,
+                            &cleanup_state,
+                            shell_cursor.position(),
+                        )?;
+                        sync_cursor_tracker_for_layout(
+                            &mut shell_cursor,
+                            layout,
+                            term_cols,
+                            term_rows,
+                        );
+                        last_paint.force();
+                    }
                     match handle_key_with_bytes(key, &mut state, &mut writer, original) {
                         KeyOutcome::Quit => {
                             transition_layout_recorded(
@@ -2570,6 +2592,31 @@ fn write_command_to_child(writer: &mut Box<dyn Write + Send>, command: &str) -> 
 enum KeyOutcome {
     Continue,
     Quit,
+}
+
+fn key_may_dispatch_queue(key: KeyEvent, state: &AppState) -> bool {
+    use crossterm::event::KeyCode;
+
+    if !state.queue_supported
+        || !matches!(state.shell_state, ShellState::AtPrompt)
+        || state.pending_bash_exit.is_some()
+        || state.editor.editing_index.is_some()
+        || state.show_help
+    {
+        return false;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('x' | 'X'))
+    {
+        return (state.queue.paused || state.force_queue)
+            && !state.queue.is_empty()
+            && (state.editor_owns_input()
+                || (!state.terminal_allows_panel && !state.effective_passthrough()));
+    }
+    key.code == KeyCode::Enter
+        && state.editor_owns_input()
+        && !state.editor.buffer.is_empty()
+        && !state.queue.paused
+        && !state.force_queue
 }
 
 #[cfg(test)]

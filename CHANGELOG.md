@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.3.2
+## 0.3.3
 
-Includes the unreleased 0.3.0 and 0.3.1 changes. Neither candidate was published.
+Includes the unreleased 0.3.0–0.3.2 changes. Those candidates were not published.
 
 ### Added
 
@@ -27,6 +27,8 @@ Includes the unreleased 0.3.0 and 0.3.1 changes. Neither candidate was published
 
 ### Fixed
 
+- Release the panel before manual queue starts and idle-draft execution, keeping
+  terminal resizing ahead of command input on every dispatch path.
 - Wait for Bash to finish drawing its prompt before dispatching queued commands,
   preventing readline from restoring a stale, reduced terminal height.
 
