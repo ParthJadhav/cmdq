@@ -28,6 +28,7 @@ The PTY suite checks actual file effects and command exit statuses, including:
 - Terminal queries/replies, keyboard and mouse protocols, alternate screens,
   resize storms, tiny terminals, signal cleanup, and shell exit status.
 - Clean shell homes, startup customization, symlinked dotfiles, and POSIX passthrough.
+- Bash prompt-readiness synchronization and a deterministic stale terminal-size regression.
 
 Tests create temporary homes and files; they do not change personal shell configs.
 An ignored throughput benchmark is diagnostic, not a correctness gate.
@@ -50,7 +51,7 @@ An ignored throughput benchmark is diagnostic, not a correctness gate.
 3. Open a release PR and wait for CI and the archive/installer checks to pass.
    Pull requests build and test artifacts without publishing them. Merge only
    after these checks pass.
-4. Tag the same commit, e.g. `git tag v0.3.0`, and push that tag.
+4. Tag the same commit, e.g. `git tag v0.3.1`, and push that tag.
 5. The release workflow reruns CI, builds all four archives, verifies their
    checksums, and runs the PTY suites against each **extracted release binary**.
    It also tests the generated shell installer and repeat installation using a
