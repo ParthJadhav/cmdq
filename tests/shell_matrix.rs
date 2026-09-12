@@ -86,7 +86,9 @@ impl Session {
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
         let writer = pair.master.take_writer().unwrap();
-        let (tx, rx) = mpsc::channel();
+        // Model terminal backpressure instead of accumulating unlimited output
+        // while the test is waiting or processing a previous PTY chunk.
+        let (tx, rx) = mpsc::sync_channel(32);
         std::thread::spawn(move || {
             let mut bytes = [0; 8192];
             while let Ok(n) = reader.read(&mut bytes) {
@@ -116,6 +118,16 @@ impl Session {
         // Model real terminal replies, including split queries. Modern Fish
         // asks again after drawing its prompt; older Fish may not query at all.
         self.output.extend_from_slice(&chunk);
+        const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+        if self.output.len() > MAX_CAPTURE_BYTES {
+            self.output.drain(..self.output.len() - MAX_CAPTURE_BYTES);
+        }
+        // Plain output is the hot path for `yes`. Avoid a per-byte query
+        // parser when neither this chunk nor its predecessor contains ESC.
+        if !chunk.contains(&0x1b) && !self.query_tail.contains(&0x1b) {
+            self.query_tail.clear();
+            return;
+        }
         for byte in chunk {
             self.query_tail.push(byte);
             if self.query_tail.ends_with(b"\x1b[0c") {
@@ -145,7 +157,7 @@ impl Session {
             }
         }
         panic!(
-            "missing {:?}; output: {}",
+            "missing {:?}; last 64 KiB of output: {}",
             String::from_utf8_lossy(bytes),
             String::from_utf8_lossy(&self.output)
         );
@@ -569,6 +581,9 @@ fn editor_bug_bash(shell: &str) {
     s.send(b"printf kept > kept\x1bOQyes\r");
     s.expect_file("answer", "yes");
     s.expect(b"\x1b]133;D;0;cmdq=1");
+    // D precedes Bash's prompt readiness. Wait for the visible restored draft
+    // before pressing Enter; F2 direct-input routing ends at prompt readiness.
+    s.expect("draft kept — Enter runs it now".as_bytes());
     s.send(b"\r");
     s.expect_file("kept", "kept");
 }

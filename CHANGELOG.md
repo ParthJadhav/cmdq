@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.3.1
+## 0.3.2
 
-Includes the unreleased 0.3.0 changes. CI blocked that candidate before publication.
+Includes the unreleased 0.3.0 and 0.3.1 changes. Neither candidate was published.
 
 ### Added
 
@@ -39,6 +39,9 @@ Includes the unreleased 0.3.0 changes. CI blocked that candidate before publicat
   portable-pty's separately versioned terminal flags.
 
 ### Release verification
+
+- Bound PTY test capture and apply backpressure so continuous-output stress
+  tests check interruption without overwhelming their own output parser.
 
 - Publishing requires CI and native archive tests on macOS and Linux, both
   x64/Intel and ARM64. Rust 1.88 is tested separately.
