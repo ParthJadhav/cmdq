@@ -581,6 +581,9 @@ fn editor_bug_bash(shell: &str) {
     s.send(b"printf kept > kept\x1bOQyes\r");
     s.expect_file("answer", "yes");
     s.expect(b"\x1b]133;D;0;cmdq=1");
+    // D precedes Bash's prompt readiness. Wait for the visible restored draft
+    // before pressing Enter; F2 direct-input routing ends at prompt readiness.
+    s.expect("draft kept — Enter runs it now".as_bytes());
     s.send(b"\r");
     s.expect_file("kept", "kept");
 }
