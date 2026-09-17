@@ -33,6 +33,8 @@ fn cli_help_and_version_surface_public_flags() {
     );
     let help_stdout = String::from_utf8_lossy(&help.stdout);
     assert!(help_stdout.contains("--shell"));
+    assert!(help_stdout.contains("--config"));
+    assert!(help_stdout.contains("config"));
     assert!(help_stdout.contains("--install-integration"));
     assert!(help_stdout.contains("--print-integration"));
 
@@ -44,6 +46,34 @@ fn cli_help_and_version_surface_public_flags() {
         String::from_utf8_lossy(&version.stderr)
     );
     assert!(String::from_utf8_lossy(&version.stdout).contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn cli_prints_effective_config_with_environment_overrides() {
+    let bin = cmdq_binary_path();
+    if !bin.exists() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, "[panel]\ndelay_ms = 2500\nmax_rows = 5\n").unwrap();
+
+    let output = Command::new(&bin)
+        .args(["--config", path.to_str().unwrap(), "config", "--print"])
+        .env("CMDQ_PANEL_DELAY_MS", "25")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "config --print failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&format!("# config file: {}", path.display())));
+    assert!(stdout.contains("# environment overrides: CMDQ_PANEL_DELAY_MS"));
+    assert!(stdout.contains("delay_ms = 25"));
+    assert!(stdout.contains("max_rows = 5"));
 }
 
 #[test]
@@ -220,6 +250,10 @@ fn binary_normal_exit_removes_session_lease() {
         session_dirs_clean,
         "cmdq synthetic shell session dirs remained after normal exit"
     );
+    assert!(
+        !queue_path.parent().unwrap().exists(),
+        "empty cmdq queue directory remained after normal exit"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -307,6 +341,10 @@ fn binary_sigterm_removes_session_lease() {
     assert!(
         session_dirs_clean,
         "cmdq synthetic shell session dirs remained after SIGTERM cleanup"
+    );
+    assert!(
+        !queue_path.parent().unwrap().exists(),
+        "empty cmdq queue directory remained after SIGTERM cleanup"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }

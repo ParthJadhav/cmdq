@@ -71,6 +71,30 @@ Each session starts with an independent empty queue. Recovery restores commands
 for review, not effects of commands already run, and lasts only for that session.
 Exit the hosted shell with `exit` or Ctrl-D at an empty shell prompt.
 
+## Configuration
+
+cmdq reads `~/.config/cmdq/config.toml` (or
+`$XDG_CONFIG_HOME/cmdq/config.toml`). The currently supported settings are:
+
+```toml
+[panel]
+delay_ms = 1500
+max_rows = 8
+
+[keys]
+forward_ctrl_x = false
+```
+
+`forward_ctrl_x = false` prevents an accidental Ctrl-X at an empty prompt from
+arming a readline chord and consuming the next character. Ctrl-X is still
+forwarded after prompt text has been entered. Set it to `true` if you rely on
+readline's Ctrl-X chords from an empty prompt.
+
+`CMDQ_PANEL_DELAY_MS`, `CMDQ_PANEL_MAX_ROWS`, and `CMDQ_FORWARD_CTRL_X`
+override the matching file settings. Use `cmdq config --print` to inspect the
+effective values and `cmdq --config /path/to/config.toml config --print` to
+inspect another file.
+
 ## Shell setup (optional)
 
 To start cmdq whenever you open a terminal, add the matching block **at the top**

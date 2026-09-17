@@ -1,0 +1,1094 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cmdq — UX improvement plan (36 items)</title>
+<style>
+  :root {
+    --bg:#0e1116; --bg2:#161b22; --bg3:#1f2530; --line:#2a313c;
+    --fg:#d7dde6; --fg2:#9aa3b2; --accent:#ffb454; --green:#7ee787; --blue:#79c0ff;
+    --bad:#ff7b72; --warn:#f0883e; --ok:#56d364; --purple:#d2a8ff; --code-bg:#0a0d12;
+    --shadow:0 1px 0 rgba(255,255,255,.04),0 8px 24px rgba(0,0,0,.4);
+  }
+  *{box-sizing:border-box} html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1120px;margin:0 auto;padding:56px 24px 140px}
+  header.hero{border-left:4px solid var(--accent);padding:6px 0 6px 24px;margin-bottom:40px}
+  .eyebrow{color:var(--accent);font-family:"JetBrains Mono","SF Mono",Menlo,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase}
+  header.hero h1{font-size:52px;line-height:1.05;margin:8px 0 12px;letter-spacing:-.02em}
+  header.hero p.lede{font-size:18px;color:var(--fg2);margin:0;max-width:760px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+  .meta span{font-family:"JetBrains Mono",monospace;font-size:12px;background:var(--bg2);border:1px solid var(--line);padding:4px 10px;border-radius:100px;color:var(--fg2)}
+  nav.toc{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:18px 22px;margin:0 0 48px;box-shadow:var(--shadow)}
+  nav.toc strong{display:block;color:var(--fg2);font-size:11px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:10px}
+  nav.toc ol{margin:0;padding:0;list-style:none;columns:2;column-gap:28px}
+  nav.toc li{margin:4px 0;break-inside:avoid} nav.toc a{color:var(--fg);text-decoration:none} nav.toc a:hover{color:var(--accent)}
+  nav.toc .n{color:var(--accent);font-family:"JetBrains Mono",monospace;font-size:12px;margin-right:8px}
+  section{margin:0 0 64px}
+  h2{font-size:30px;letter-spacing:-.01em;margin:0 0 8px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+  h2 .num{color:var(--accent);font-family:"JetBrains Mono",monospace;font-size:14px;margin-right:14px;vertical-align:6px;letter-spacing:.1em}
+  p.section-lede{color:var(--fg2);margin:0 0 22px;max-width:820px}
+  h3{font-size:20px;margin:0;color:var(--fg)}
+  h4{font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg2);margin:18px 0 6px}
+  p{margin:10px 0}
+  code,pre{font-family:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;font-size:13px}
+  code{background:var(--bg3);color:var(--blue);padding:1px 6px;border-radius:4px}
+  pre{background:var(--code-bg);color:var(--fg);padding:14px 16px;border-radius:8px;border:1px solid var(--line);overflow-x:auto;line-height:1.45;margin:10px 0}
+  pre code{background:transparent;padding:0;color:inherit}
+  pre .c{color:#6e7681;font-style:italic} pre .k{color:#ff7b72} pre .s{color:#a5d6ff} pre .t{color:#ffa657} pre .f{color:#79c0ff}
+  .item{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:20px 24px 22px;margin:18px 0;box-shadow:var(--shadow)}
+  .item > header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;margin-bottom:4px}
+  .item .id{font-family:"JetBrains Mono",monospace;color:var(--accent);font-size:13px;letter-spacing:.08em}
+  .tags{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
+  .tag{font-family:"JetBrains Mono",monospace;font-size:11px;padding:2px 8px;border-radius:100px;border:1px solid var(--line);color:var(--fg2);background:var(--bg3);letter-spacing:.04em}
+  .tag.e-s{color:var(--ok);border-color:rgba(86,211,100,.35)} .tag.e-m{color:var(--accent);border-color:rgba(255,180,84,.35)} .tag.e-l{color:var(--bad);border-color:rgba(255,123,114,.35)}
+  .tag.imp{color:var(--purple);border-color:rgba(210,168,255,.35)}
+  .tag.kind{color:var(--blue);border-color:rgba(121,192,255,.35)}
+  .item ul,.item ol{margin:6px 0 6px 20px;padding:0} .item li{margin:4px 0}
+  ul.where li{list-style:none;margin-left:-20px;padding-left:0}
+  ul.where code{color:var(--green)}
+  .callout{border-left:3px solid var(--accent);background:linear-gradient(90deg,rgba(255,180,84,.08),rgba(255,180,84,0));padding:12px 16px;border-radius:0 6px 6px 0;margin:16px 0}
+  .callout.insight{border-color:var(--green);background:linear-gradient(90deg,rgba(126,231,135,.08),rgba(126,231,135,0))}
+  .callout.warn{border-color:var(--warn);background:linear-gradient(90deg,rgba(240,136,62,.08),rgba(240,136,62,0))}
+  .callout.bad{border-color:var(--bad);background:linear-gradient(90deg,rgba(255,123,114,.08),rgba(255,123,114,0))}
+  .callout strong{color:var(--accent)} .callout.insight strong{color:var(--green)} .callout.warn strong{color:var(--warn)} .callout.bad strong{color:var(--bad)}
+  table{width:100%;border-collapse:collapse;margin:16px 0;background:var(--bg2);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);font-size:13.5px;vertical-align:top}
+  th{background:var(--bg3);color:var(--fg2);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+  tr:last-child td{border-bottom:none} td a{color:var(--fg);text-decoration:none;border-bottom:1px dotted var(--fg2)} td a:hover{color:var(--accent)}
+  .p0{color:var(--bad);font-weight:700} .p1{color:var(--accent);font-weight:700} .p2{color:var(--blue);font-weight:700}
+  .term{background:#0a0d12;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:12px 0;font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.45}
+  .term .bar{background:#161b22;padding:6px 12px;border-bottom:1px solid var(--line);color:#8b949e;font-size:11px;display:flex;gap:8px;align-items:center}
+  .term .dot{width:10px;height:10px;border-radius:50%;background:#444} .dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+  .term .body{padding:10px 14px;color:#c9d1d9;white-space:pre;overflow-x:auto}
+  .term .hd{color:#79c0ff} .term .pz{color:#e3b341} .term .key{color:#79c0ff;font-weight:700} .term .dim{color:#6e7681} .term .note{color:#e3b341} .term .cur{background:#c9d1d9;color:#0a0d12} .term .sel{color:#56d3d3;font-weight:700} .term .bad{color:#ff7b72}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px} @media(max-width:820px){.grid2{grid-template-columns:1fr} nav.toc ol{columns:1} header.hero h1{font-size:36px} .tags{margin-left:0}}
+  .kv{display:grid;grid-template-columns:150px 1fr;gap:6px 14px;font-size:14px} .kv b{color:var(--fg2);font-weight:600}
+  figure{margin:16px 0;background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:var(--shadow)}
+  figcaption{color:var(--fg2);font-size:13px;margin-top:10px;text-align:center}
+  svg{display:block;max-width:100%;height:auto} svg text{fill:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif;font-size:13px}
+  svg .mono{font-family:"JetBrains Mono",monospace;font-size:12px} svg .dim{fill:var(--fg2)} svg .box{fill:var(--bg3);stroke:var(--line)} svg .box-hi{fill:#221a0c;stroke:var(--accent);stroke-width:1.5} svg .box-ok{fill:#0c1a12;stroke:#2d4d36} svg .stroke{stroke:var(--fg2);fill:none;stroke-width:1.2}
+  footer{color:var(--fg2);font-size:13px;text-align:center;padding:24px 0}
+  hr{border:none;border-top:1px solid var(--line);margin:48px 0}
+  kbd{font-family:"JetBrains Mono",monospace;font-size:12px;background:var(--bg3);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 6px;color:var(--fg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">UX review · cmdq 0.3.3 · 13 Sep 2026</div>
+  <h1>36 improvements, and where each one lives</h1>
+  <p class="lede">A whole-app review of cmdq's user experience: first run, the bottom panel, keys and modes, queue composition, dispatch feedback, working directories, sessions and persistence, the CLI, configuration, and diagnostics. Every item names the problem it fixes, the evidence, the proposed behaviour, the exact files and functions to change, the implementation steps, and the tests that should pin it.</p>
+  <div class="meta">
+    <span>src: 7 032 lines app.rs · 1 434 panel.rs · 1 666 queue.rs · 810 input.rs</span>
+    <span>41 live panel states captured in tmux (isolated HOME)</span>
+    <span>data dir inspected: 21 orphaned queue dirs</span>
+    <span>effort S ≈ hours · M ≈ 1–3 days · L ≈ a week+</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><span class="n">00</span><a href="#method">Method and what was observed</a></li>
+    <li><span class="n">01</span><a href="#summary">Summary matrix and priorities</a></li>
+    <li><span class="n">A</span><a href="#a">First run and discoverability (1–4)</a></li>
+    <li><span class="n">B</span><a href="#b">Panel layout and rendering (5–10)</a></li>
+    <li><span class="n">C</span><a href="#c">Keys, modes and confirmations (11–15)</a></li>
+    <li><span class="n">D</span><a href="#d">Composing and editing the queue (16–21)</a></li>
+    <li><span class="n">E</span><a href="#e">Dispatch, execution and feedback (22–26)</a></li>
+    <li><span class="n">F</span><a href="#f">Working directory, sessions and persistence (27–30)</a></li>
+    <li><span class="n">G</span><a href="#g">CLI, saved queues and configuration (31–33)</a></li>
+    <li><span class="n">H</span><a href="#h">Diagnostics, copy and edge cases (34–36)</a></li>
+    <li><span class="n">02</span><a href="#roadmap">Suggested roadmap</a></li>
+    <li><span class="n">03</span><a href="#keymap">Appendix: current vs proposed key map</a></li>
+    <li><span class="n">04</span><a href="#captures">Appendix: captured panel states</a></li>
+  </ol>
+</nav>
+
+<!-- ============================================================ -->
+<section id="method">
+<h2><span class="num">00</span>Method and what was observed</h2>
+<p class="section-lede">The review is grounded in three sources: a full read of the Rust sources and the shell hooks, a scripted tmux session that drove the installed 0.3.3 binary through 41 states with an isolated <code>HOME</code> and <code>XDG_DATA_HOME</code>, and an inspection of the real data directory.</p>
+
+<div class="grid2">
+  <div class="callout insight"><strong>What works well today.</strong> Byte-transparent passthrough (no alt-screen, native scrollback and selection survive), the draft is never lost, dangerous actions need a second press, conditional execution is visible per item, the hints row adapts to width, alt-screen and mouse-capture programs are handed the screen automatically, and the PTY test suite is unusually thorough. The improvements below build on that foundation rather than replace it.</div>
+  <div class="callout warn"><strong>Where the friction is.</strong> The product is invisible until a command runs longer than 1.5 s; state is communicated by single glyphs (<code>▶ ○ ✓ ✎ ↑</code>); four different keys flip who owns the keyboard; the panel changes height (and resizes the child PTY) every time an item is added; there is no completion, no history, no notification when the queue finishes, no way to enqueue from outside the panel, and no configuration surface at all.</div>
+</div>
+
+<h4>Evidence that shaped the list</h4>
+<ul>
+  <li><b>Panel height churn.</b> <code>desired_layout</code> (app.rs:1949) recomputes height from queue length and notice presence; any change goes through <code>transition_layout</code> (app.rs:2026) which releases, re-reserves, and calls <code>resize_pty_for_layout</code>. Adding one queued item therefore sends the running program a SIGWINCH.</li>
+  <li><b>Same label, different key.</b> While a command runs the hint reads <kbd>F2</kbd> ↑ Type above; at an idle or paused prompt the identical label is bound to <kbd>Ctrl-Q</kbd> (captures 01 vs 14).</li>
+  <li><b>Persistent chrome at an idle prompt.</b> After <kbd>Ctrl-K</kbd><kbd>Ctrl-K</kbd> at a prompt the panel stays reserved showing "↑ Typing above" plus the "Cleared 12 commands" notice until <kbd>F3</kbd> is pressed (capture 22), because <code>panel_should_be_visible</code> (app.rs:265) includes <code>activity.is_some()</code>.</li>
+  <li><b>Overflow without a count.</b> Twelve queued items render as "○ ↓" with eight rows and no indication of how many are hidden (capture 18); <code>header_reports_hidden_queue_items</code> in panel.rs asserts the count is <em>not</em> shown.</li>
+  <li><b>Quit discards silently.</b> The pending-quit hint says "Ctrl-D Quit (press again)" while the status that explains the queue will be discarded is suppressed by <code>panel_notice</code> (capture 40).</li>
+  <li><b>Readline prefix leak.</b> <kbd>Ctrl-X</kbd> at an idle prompt with an empty queue is forwarded as byte 0x18, which Bash treats as a chord prefix; the next typed character is swallowed (capture 27: <code>leep 2</code>).</li>
+  <li><b>Dead restore path and leaked directories.</b> <code>new_session_path</code> (queue.rs:737) always creates a fresh directory, so <code>prepare_queue_for_startup</code> (app.rs:1635) can never find items to restore, and nothing removes <code>queues/&lt;pid-ts&gt;/</code> on exit: 21 orphaned directories were present on the machine used for this review.</li>
+  <li><b>Idle I/O.</b> Every session reads and locks its own queue file every 500 ms (<code>sync_queue_from_disk_if_due</code>) and rewrites a lease file every second (<code>refresh_session_lease_if_due</code>), although no other process writes those files.</li>
+  <li><b>Tab message is a leftover.</b> Tab in the editor says "Completion is not available in the queue — Alt-S changes the run condition"; the second clause dates from when Tab toggled the condition.</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="summary">
+<h2><span class="num">01</span>Summary matrix and priorities</h2>
+<p class="section-lede">P0 items remove daily friction or fix behaviour that is currently misleading; P1 items add the capabilities users expect from a queue; P2 items are polish and platform hygiene. Effort is a rough size for one engineer familiar with the code.</p>
+<table>
+<thead><tr><th style="width:36px">#</th><th>Improvement</th><th style="width:120px">Area</th><th style="width:60px">Effort</th><th style="width:60px">Impact</th><th style="width:44px">Pri</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><a href="#i01">One-time startup line so users know cmdq is active</a></td><td>First run</td><td>S</td><td>●●●●○</td><td class="p0">P0</td></tr>
+<tr><td>2</td><td><a href="#i02">Integration health check in-session and <code>cmdq --doctor</code></a></td><td>First run</td><td>M</td><td>●●●●●</td><td class="p0">P0</td></tr>
+<tr><td>3</td><td><a href="#i03">Help that explains the model, scrolls, and is complete</a></td><td>First run</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>4</td><td><a href="#i04">Export <code>CMDQ_SESSION</code> and a machine-readable state file</a></td><td>First run</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>5</td><td><a href="#i05">Stable panel height: stop resizing the child per queued item</a></td><td>Panel</td><td>M</td><td>●●●●●</td><td class="p0">P0</td></tr>
+<tr><td>6</td><td><a href="#i06">Compact one-row mode and auto-collapse</a></td><td>Panel</td><td>M</td><td>●●●●○</td><td class="p1">P1</td></tr>
+<tr><td>7</td><td><a href="#i07">Overflow counts and ellipses instead of bare arrows and hard cuts</a></td><td>Panel</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>8</td><td><a href="#i08">Header shows the running command, elapsed time and batch progress</a></td><td>Panel</td><td>M</td><td>●●●●●</td><td class="p0">P0</td></tr>
+<tr><td>9</td><td><a href="#i09">Theme-safe rendering: attributes over absolute colours, <code>NO_COLOR</code></a></td><td>Panel</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>10</td><td><a href="#i10">One message model with severity, fixed slot, and no input-line jumping</a></td><td>Panel</td><td>M</td><td>●●●●○</td><td class="p0">P0</td></tr>
+<tr><td>11</td><td><a href="#i11">One focus-toggle key instead of F2 / Ctrl-Q / Esc Esc / Ctrl-\</a></td><td>Keys</td><td>M</td><td>●●●●●</td><td class="p0">P0</td></tr>
+<tr><td>12</td><td><a href="#i12">Meta-free and F-key-free alternatives, with macOS Option detection</a></td><td>Keys</td><td>S</td><td>●●●●○</td><td class="p0">P0</td></tr>
+<tr><td>13</td><td><a href="#i13">One confirmation gesture, one window, honest wording</a></td><td>Keys</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>14</td><td><a href="#i14">Do not leak Ctrl-X into readline when there is nothing to resume</a></td><td>Keys</td><td>S</td><td>●●○○○</td><td class="p2">P2</td></tr>
+<tr><td>15</td><td><a href="#i15">Queue as next, move to top/bottom</a></td><td>Keys</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>16</td><td><a href="#i16">Path completion on Tab in the queue editor</a></td><td>Editing</td><td>M</td><td>●●●●●</td><td class="p0">P0</td></tr>
+<tr><td>17</td><td><a href="#i17">History recall and search (Ctrl-R) from the shell's history</a></td><td>Editing</td><td>M</td><td>●●●●●</td><td class="p0">P0</td></tr>
+<tr><td>18</td><td><a href="#i18">Split a multi-line paste into separate items when it is a list</a></td><td>Editing</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>19</td><td><a href="#i19">Tri-state run condition and a queue-level stop-on-failure policy</a></td><td>Editing</td><td>M</td><td>●●●●○</td><td class="p1">P1</td></tr>
+<tr><td>20</td><td><a href="#i20">Item annotations: numbers, origin directory, full-text preview</a></td><td>Editing</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>21</td><td><a href="#i21">Multi-level undo that names what it restores</a></td><td>Editing</td><td>S</td><td>●●○○○</td><td class="p2">P2</td></tr>
+<tr><td>22</td><td><a href="#i22">Separator lines in scrollback and an end-of-queue summary</a></td><td>Dispatch</td><td>M</td><td>●●●●○</td><td class="p1">P1</td></tr>
+<tr><td>23</td><td><a href="#i23">Notify when the queue finishes or fails while the window is unfocused</a></td><td>Dispatch</td><td>M</td><td>●●●●●</td><td class="p0">P0</td></tr>
+<tr><td>24</td><td><a href="#i24">Retry: re-queue the interrupted or failed command</a></td><td>Dispatch</td><td>S</td><td>●●●●○</td><td class="p1">P1</td></tr>
+<tr><td>25</td><td><a href="#i25">Skipped items stay visible and say why</a></td><td>Dispatch</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>26</td><td><a href="#i26">Show the last exit code so conditionals are predictable</a></td><td>Dispatch</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>27</td><td><a href="#i27">Directory mismatch: offer "run where it was queued"</a></td><td>cwd</td><td>M</td><td>●●●●○</td><td class="p1">P1</td></tr>
+<tr><td>28</td><td><a href="#i28">Reattach an orphaned queue after a crash (replaces the dead restore path)</a></td><td>Sessions</td><td>M</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>29</td><td><a href="#i29">Remove per-session queue directories on exit; sweep stale ones</a></td><td>Sessions</td><td>S</td><td>●●●○○</td><td class="p0">P0</td></tr>
+<tr><td>30</td><td><a href="#i30">Stop idle polling and lease writes unless something can write externally</a></td><td>Sessions</td><td>S</td><td>●●○○○</td><td class="p2">P2</td></tr>
+<tr><td>31</td><td><a href="#i31"><code>cmdq add / list / pause / resume / clear</code> targeting the current session</a></td><td>CLI</td><td>L</td><td>●●●●●</td><td class="p1">P1</td></tr>
+<tr><td>32</td><td><a href="#i32">Saved, named queues</a></td><td>CLI</td><td>M</td><td>●●●●○</td><td class="p1">P1</td></tr>
+<tr><td>33</td><td><a href="#i33">A configuration file and environment overrides</a></td><td>Config</td><td>M</td><td>●●●●○</td><td class="p0">P0</td></tr>
+<tr><td>34</td><td><a href="#i34">Make input-ownership decisions transparent and loggable</a></td><td>Diagnostics</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>35</td><td><a href="#i35">Message copy: one voice, one key spelling, no leftovers</a></td><td>Copy</td><td>S</td><td>●●●○○</td><td class="p1">P1</td></tr>
+<tr><td>36</td><td><a href="#i36">Small-terminal behaviour that explains itself</a></td><td>Edge cases</td><td>S</td><td>●●○○○</td><td class="p2">P2</td></tr>
+</tbody>
+</table>
+</section>
+
+<!-- ============================================================ -->
+<section id="a">
+<h2><span class="num">A</span>First run and discoverability</h2>
+<p class="section-lede">cmdq is deliberately invisible until a command has run for 1.5 seconds. That is the right default for experienced users, but it means a new user sees a bare prompt and has no way to know whether cmdq is working, broken, or even running. These four items make the first ten minutes self-explanatory without adding chrome to the steady state.</p>
+
+<article class="item" id="i01">
+  <header><span class="id">01</span><h3>One-time startup line so users know cmdq is active</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>Capture 00 is a bare <code>$</code>. Nothing distinguishes a cmdq-hosted shell from a plain one. The README explains the 1.5 s rule, but the product never does, and the only in-app discovery path is pressing <kbd>F1</kbd> while a panel happens to be visible.</p>
+  <h4>Proposal</h4>
+  <p>Print one dim line before the shell's first prompt, and only on the first few launches (or until the user has queued something once): <code>cmdq 0.3.3 · the queue opens when a command runs ≥1.5 s or on Ctrl-Q · F1 help</code>. Suppress with <code>CMDQ_QUIET=1</code> or the config key <code>startup_hint = false</code> (item 33). After the first successful dispatch, write a marker file so the line never appears again.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>run_with_exit_status</code> (app.rs:581), just before <code>ShellPty::spawn</code>: write the line to stdout with the same dim attribute the panel uses, followed by <code>\r\n</code>, so the shell's prompt lands under it.</li>
+    <li><code>src/paths.rs</code>: add <code>state_dir()</code> (<code>$XDG_STATE_HOME/cmdq</code> or the data dir) and a <code>first_run_marker()</code> path.</li>
+    <li><code>src/app.rs</code> · <code>dispatch_next_eligible</code> (app.rs:2435): on the first <code>Claimed</code> dispatch, touch the marker.</li>
+  </ul>
+  <h4>How</h4>
+  <ol>
+    <li>Before spawning, check the marker; if absent and not quiet, emit the line. Do this before raw mode so the terminal's own line discipline handles wrapping.</li>
+    <li>Ask the terminal for the cursor position <em>after</em> the line (the existing <code>query_cursor_position</code> already runs after raw mode is enabled) so the initial panel reservation math stays correct.</li>
+    <li>Rate-limit: show on at most the first three launches even if nothing is ever dispatched, so a user who only ever runs quick commands is not nagged forever.</li>
+  </ol>
+  <h4>Tests</h4>
+  <p><code>tests/binary_smoke.rs</code>: new session with empty state dir prints the line once; a second launch after a dispatch prints nothing; <code>CMDQ_QUIET=1</code> prints nothing. Assert the prompt still appears on the row below the line (cursor query path).</p>
+</article>
+
+<article class="item" id="i02">
+  <header><span class="id">02</span><h3>Integration health check in-session and <code>cmdq --doctor</code></h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p>If the OSC 133 markers never arrive (a prompt framework that replaces <code>precmd</code>, a <code>.zshrc</code> that <code>exec</code>s another shell, an instant-prompt cache, a stray <code>trap DEBUG</code>), cmdq silently degrades to a transparent wrapper: no panel ever appears and every keystroke goes to the shell. The user's only signal is absence. There is also no way to ask "is my setup healthy?" from the command line.</p>
+  <h4>Proposal</h4>
+  <p>Two layers. <b>In-session:</b> track "Enter pressed at the prompt with a plausible command" (the app already computes <code>submitted_prompt_line</code>) versus "CommandStart marker received". If three submissions pass with no marker, set a sticky warning: <code>shell hooks are not reporting — queueing is off · run cmdq --doctor</code>. <b>CLI:</b> <code>cmdq --doctor</code> spawns the user's shell in a PTY exactly as a session would, runs <code>true</code>, and reports which markers were seen, which shell and rc files were used, whether the terminal answered the cursor query, whether Alt sends ESC-prefixed bytes, and the data-dir state (orphaned queues, lock files). Exit non-zero when hooks are missing.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/main.rs</code>: add <code>--doctor</code> to <code>Cli</code>; dispatch to a new <code>src/doctor.rs</code>.</li>
+    <li><code>src/doctor.rs</code> (new): reuse <code>ShellPty::spawn</code> (pty.rs) and <code>osc133::Detector::for_cmdq</code>; feed output for up to 3 s; print a checklist.</li>
+    <li><code>src/app.rs</code> · <code>AppState</code>: add <code>unconfirmed_submissions: u8</code>; increment in <code>should_optimistically_mark_command_started</code> (app.rs:3355) when it returns true; reset to 0 in <code>handle_osc_event</code> on <code>CommandStart</code>.</li>
+    <li><code>src/app.rs</code> · <code>mark_command_started</code> (app.rs:2361): if the optimistic start is never confirmed by a marker before the next <code>PromptStart</code>... there is no PromptStart either when hooks are missing, so use a timer: 2 s after an optimistic start with no marker, count it.</li>
+  </ul>
+  <h4>How</h4>
+  <ol>
+    <li>Doctor output is plain text, one check per line with ✓/✗, followed by a remediation hint per failure (for example "powerlevel10k instant prompt detected: move the cmdq exec line above the instant-prompt block").</li>
+    <li>In-session warning uses the sticky severity from item 10 so it does not fade after 4 s.</li>
+    <li>Document in README under Troubleshooting: "Nothing appears? Run <code>cmdq --doctor</code>".</li>
+  </ol>
+  <h4>Tests</h4>
+  <p><code>tests/shell_matrix.rs</code>: doctor passes for bash, zsh and fish with clean homes; fails with a zshrc that <code>unfunction</code>s <code>add-zsh-hook</code>. Unit test in app.rs: three optimistic starts without markers set the warning; one marker clears the counter.</p>
+</article>
+
+<article class="item" id="i03">
+  <header><span class="id">03</span><h3>Help that explains the model, scrolls, and is complete</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>The help panel (<code>paint_help</code>, panel.rs:706) is a flat list of 20 bindings. It omits <kbd>?</kbd>, the double-<kbd>Esc</kbd> passthrough toggle, the paste rules, the working-directory rule, and the 1.5 s rule, and it truncates on short terminals by dropping the middle. Users who arrive confused about <em>why</em> a queue paused or <em>when</em> the panel appears find only key names.</p>
+  <h4>Proposal</h4>
+  <p>Three short sections with a one-line mental model each ("The queue opens when a command runs longer than 1.5 s. Typing goes to the queue; F2 sends it to the program instead."), then bindings grouped by state, then rules (paste, cwd, Ctrl-C pauses). Make the body scrollable with <kbd>↑</kbd>/<kbd>↓</kbd>/<kbd>PgUp</kbd>/<kbd>PgDn</kbd> and show "1–18 of 34" in the title. Generate the bindings table from the same data structure the hints row uses so the two can never drift (today <code>paint_hints</code> and <code>paint_help</code> maintain separate literal lists).</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/panel.rs</code>: introduce <code>const BINDINGS: &[Binding]</code> with <code>{ key, label, help, contexts }</code>; <code>paint_hints</code> (panel.rs:505) filters by context, <code>paint_help</code> renders all. Add <code>help_scroll: usize</code> to <code>PanelState</code>.</li>
+    <li><code>src/app.rs</code> · <code>handle_key_with_bytes</code> (app.rs:2631), the <code>show_help</code> branch: handle arrows and page keys by adjusting <code>state.help_scroll</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Extend <code>help_fits_a_standard_24_row_terminal</code>: every binding in <code>BINDINGS</code> is reachable by scrolling; the dismissal line is always on the last row; hints and help never disagree on a key's label.</p>
+</article>
+
+<article class="item" id="i04">
+  <header><span class="id">04</span><h3>Export <code>CMDQ_SESSION</code> and a machine-readable state file</h3>
+  <div class="tags"><span class="tag kind">foundation</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>The inner shell only learns <code>CMDQ_ACTIVE=1</code> (pty.rs:67). It cannot show a queue indicator in the prompt, scripts cannot find the session's queue file, and there is no stable identity for the CLI in item 31 to target.</p>
+  <h4>Proposal</h4>
+  <p>Export <code>CMDQ_SESSION=&lt;absolute path to the session dir&gt;</code> and <code>CMDQ_VERSION</code>. Write <code>state.json</code> beside <code>queue.json</code> on every state change that the prompt might care about: <code>{ "queued": 3, "paused": false, "running": "make test", "started_at": ... }</code>. Ship an optional prompt snippet in the integration scripts: a <code>_cmdq_prompt_segment</code> function that prints <code>⧗3</code> when items are queued, for users to add to <code>PS1</code>/<code>PROMPT</code>/<code>fish_prompt</code>.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/pty.rs</code> · <code>ShellPty::spawn</code>: <code>cmd.env("CMDQ_SESSION", session_dir)</code>. The session dir is chosen in <code>queue::new_session_path</code> (queue.rs:737); pass it in.</li>
+    <li><code>src/app.rs</code> · <code>save_queue_if_dirty</code> (app.rs:1760) and <code>handle_osc_event</code> on <code>CommandStart</code>/<code>CommandEnd</code>: write <code>state.json</code> atomically via <code>shell_integration::write_file_atomic</code>.</li>
+    <li><code>shell/integration.{zsh,bash,fish}</code>: add the prompt-segment function; it reads the file only when <code>$CMDQ_SESSION</code> is set.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p><code>tests/binary_smoke.rs</code>: <code>echo $CMDQ_SESSION</code> inside the hosted shell prints an existing directory; after queueing two items <code>state.json</code> reports <code>"queued": 2</code>.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="b">
+<h2><span class="num">B</span>Panel layout and rendering</h2>
+<p class="section-lede">The panel is painted into a DEC scrolling region at the bottom of the real terminal. That design is sound; the problems are in what the rows say and how often their number changes.</p>
+
+<article class="item" id="i05">
+  <header><span class="id">05</span><h3>Stable panel height: stop resizing the child for every queued item</h3>
+  <div class="tags"><span class="tag kind">fix</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p><code>panel_height</code> (panel.rs:109) is <code>1 + min(queue.len, 8) + 1 + 1 + notice</code>. Every enqueue, delete, notice appearance and notice fade changes the height; <code>transition_layout</code> releases the region, re-reserves it, and resizes the PTY, which delivers SIGWINCH to the running program. Progress bars redraw, <code>less -X</code> style pagers reflow, log tails jump, and the shell's cursor row is recomputed each time. Captures 03 → 04 show the input line moving down a row simply because a notice appeared.</p>
+  <h4>Proposal</h4>
+  <p>Introduce hysteresis and a reserved notice slot:</p>
+  <ul>
+    <li>While a command is running, the panel may <b>grow</b> but never shrink; shrink only at <code>CommandEnd</code> or when the panel hides.</li>
+    <li>Grow in steps of two rows (2, 4, 6, 8 list rows) rather than one, halving resize events while composing a queue.</li>
+    <li>Always reserve the notice row while the panel is open; paint it blank when there is nothing to say (item 10).</li>
+    <li>Coalesce: if a layout change is requested twice within 100 ms, apply only the last (a burst of pastes or deletes becomes one resize).</li>
+  </ul>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/panel.rs</code> · <code>panel_height</code>: accept a <code>min_height</code> floor from the caller; notice row always counted.</li>
+    <li><code>src/app.rs</code> · <code>desired_layout</code> (app.rs:1949): new field <code>AppState.layout_floor: u16</code>; set to the current reserved height on every grow while <code>shell_state == Running</code>; reset to 0 in <code>handle_osc_event</code> on <code>CommandEnd</code> and when the layout becomes <code>Hidden</code>.</li>
+    <li><code>src/app.rs</code> main loop step 2 ("Update panel layout"): add <code>layout_change_requested_at: Option&lt;Instant&gt;</code> for coalescing.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p><code>tests/path_a_smoke.rs</code>: queue five items during <code>sleep</code>; count DECSTBM writes (<code>find_decstbm</code> helper exists) and assert at most three; after the sixth item is deleted the region height is unchanged until the command ends. Unit test: <code>desired_layout</code> never returns a smaller <code>Reserved</code> height than the floor while running.</p>
+</article>
+
+<article class="item" id="i06">
+  <header><span class="id">06</span><h3>Compact one-row mode and auto-collapse</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>With eight items queued the panel takes eleven or twelve of the terminal's rows. Users watching a build log or a test runner lose half their screen to a list they already know.</p>
+  <h4>Proposal</h4>
+  <p>A collapsed layout of one or two rows: <code>▶ make test 1m12s · 3 queued · next: cargo build ❯ _</code> with the input on the same row when wide enough, otherwise on a second row. Toggle with <kbd>Ctrl-O</kbd> (mnemonic: <em>open/close</em>); auto-collapse when the terminal has fewer than 16 rows, and expand automatically while editing a queued item. Remember the choice in the config file (item 33).</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/panel.rs</code>: <code>PanelState.compact: bool</code>; a <code>paint_compact</code> sibling of <code>paint_normal</code>; <code>panel_height</code> returns 1 or 2 when compact.</li>
+    <li><code>src/input.rs</code> · <code>InputAction::ToggleCompact</code>; bind in <code>LineEditor::handle_key</code> under <code>KeyCode::Char('o') if ctrl</code>.</li>
+    <li><code>src/app.rs</code> · <code>desired_layout</code>: force expanded while <code>editor.editing_index.is_some()</code> or <code>show_help</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Panel unit tests: compact height is 1 at 120 cols and 2 at 60 cols; hints still end with Help; editing forces expansion and the previous compact choice is restored afterwards.</p>
+</article>
+
+<article class="item" id="i07">
+  <header><span class="id">07</span><h3>Overflow counts and ellipses instead of bare arrows and hard cuts</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Capture 18: twelve items render as "○ ↓" plus eight rows; the user cannot tell whether four or forty are hidden. <code>clip_to_width</code> (panel.rs:865) cuts long commands at the terminal edge with no marker, so <code>git commit -m "fix the thing that</code> looks complete.</p>
+  <h4>Proposal</h4>
+  <p>Header shows <code>3–10 of 12</code> when the window is scrolled, <code>12 queued · 4 more ↓</code> when only the tail is hidden. Clipped rows end in <code>…</code>. Long commands in the list may also wrap to a second row when the panel is expanded and fewer than four items are queued.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/panel.rs</code> · <code>paint_header</code> (panel.rs:456) and <code>queue_overflow</code> (panel.rs:444).</li>
+    <li><code>src/panel.rs</code> · <code>clip_to_width</code>: add <code>clip_with_ellipsis</code> used by <code>paint_normal</code> for list rows and the notice row; keep the raw clip for the input line (which already uses <code>input_window</code>).</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Update <code>header_reports_hidden_queue_items</code> to expect the count; new test: a 200-character command at 80 columns renders 79 cells plus <code>…</code> and never a partial wide character.</p>
+</article>
+
+<article class="item" id="i08">
+  <header><span class="id">08</span><h3>Header shows the running command, elapsed time and batch progress</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p>The header is a single glyph (<code>▶</code>) and a rule. cmdq knows exactly which command is running (it dispatched it), when it started (<code>command_started_at</code>), how many it has dispatched in this batch, and how many remain. None of that is shown. The transient "dispatched: make test" status fades after 4 s. During a ten-minute queue the user has no idea where they are.</p>
+  <h4>Proposal</h4>
+  <p>Header at ≥ 80 columns: <code>▶ running  make test  1m12s  ·  2 of 5 done  ·  3 queued</code>. At narrower widths drop segments from the right. When idle: <code>✓ idle · last: make test exited 0 in 1m12s</code>. Elapsed time ticks once per second (the loop already wakes every 50 ms idle; add a 1 s repaint key component).</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>AppState</code>: add <code>running_command: Option&lt;String&gt;</code> (set in <code>dispatch_next_eligible</code> on <code>Claimed</code> and in the optimistic-start path from <code>submitted_prompt_line</code>), <code>batch_done: u32</code>, <code>batch_total: u32</code> (total = done + queue.len at the moment a batch starts; reset when the queue empties or is cleared).</li>
+    <li><code>src/panel.rs</code> · <code>PanelState</code>: <code>running_command</code>, <code>elapsed: Option&lt;Duration&gt;</code>, <code>batch: Option&lt;(u32,u32)&gt;</code>, <code>last_result: Option&lt;(String, i32, Duration)&gt;</code>; <code>paint_header</code> composes the segments with width-aware dropping (reuse the fitting loop from <code>paint_hints</code>).</li>
+    <li><code>src/app.rs</code> · <code>panel_render_key</code> (app.rs:1481): hash <code>elapsed.as_secs()</code> so the header repaints once per second and not every tick.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Panel: header at 100, 80, 60 and 40 columns contains the expected subset and never exceeds width. App: after two dispatches <code>batch == (2, 5)</code>; clearing resets it.</p>
+</article>
+
+<article class="item" id="i09">
+  <header><span class="id">09</span><h3>Theme-safe rendering: attributes over absolute colours, <code>NO_COLOR</code></h3>
+  <div class="tags"><span class="tag kind">fix</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>The painter uses five absolute ANSI colours (Cyan, Yellow, Grey, DarkGrey, White). On a light-background terminal <code>White</code> (the first queued item) is invisible and <code>Yellow</code> notices are barely legible; on Solarized Light, Grey and DarkGrey invert. There is no <code>NO_COLOR</code> support and no way to adjust.</p>
+  <h4>Proposal</h4>
+  <p>Express hierarchy with attributes first (bold for the next item and the active hint key, dim for secondary items and labels, reverse video for the selected row) and use the terminal's default foreground. Keep two accent colours (state and warning) chosen from the 16-colour palette so they follow the user's theme, and honour <code>NO_COLOR</code> and <code>TERM=dumb</code> by dropping colour entirely. Expose the palette in the config file (item 33).</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/panel.rs</code>: introduce <code>struct Palette { state, warn, accent, muted, selected }</code> stored in <code>PanelState</code>; replace every <code>SetForegroundColor(Color::…)</code> in <code>paint_normal</code>, <code>paint_header</code>, <code>paint_hints</code>, <code>paint_help</code>.</li>
+    <li><code>src/app.rs</code> · <code>run_with_exit_status</code>: build the palette from env and config once.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>With <code>NO_COLOR=1</code> the painted bytes contain no SGR colour parameters (30–37, 90–97, 38); with colour enabled, no absolute <code>White</code> is emitted.</p>
+</article>
+
+<article class="item" id="i10">
+  <header><span class="id">10</span><h3>One message model with severity, a fixed slot, and no input-line jumping</h3>
+  <div class="tags"><span class="tag kind">refactor</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>Feedback is split across <code>status</code> (fades after <code>STATUS_TTL</code>), <code>activity</code> (sticky until F3), hint-row overrides for pending confirmations, and a suppression list in <code>panel_notice</code> (panel.rs:60) that decides by string prefix which statuses are "routine". Consequences: errors such as "queue save failed" fade like chatter; the pending-quit explanation is hidden (capture 40); a sticky activity keeps the whole panel reserved at an idle prompt (capture 22); and the input line moves when a notice appears.</p>
+  <h4>Proposal</h4>
+  <p>Replace both strings with <code>Option&lt;Message&gt;</code> where <code>Message { text, severity: Info | Success | Warning | Error, sticky: bool, set_at }</code>. Rules: Info/Success fade after 4 s; Warning stays until the next user action; Error stays until F3 or resolution. Only one message shows at a time; a new Error preempts, a new Info does not replace a Warning. The notice slot is always reserved while the panel is open (see item 5) and painted blank when empty. A sticky message alone never keeps the panel open at an idle prompt; instead it is shown once the panel next appears, and a Warning/Error additionally prints a single dim line into the shell area when the panel hides so it is not lost.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code>: new <code>enum Severity</code>, <code>struct Message</code>; replace <code>status</code>, <code>status_set_at</code>, <code>activity</code> in <code>AppState</code>; <code>set_status</code> (app.rs:321) becomes <code>notify(severity, text)</code>; <code>tick_status</code> (app.rs:326) implements the fade rules; remove <code>activity.is_some()</code> from <code>panel_should_be_visible</code> (app.rs:265).</li>
+    <li><code>src/panel.rs</code>: delete the prefix list in <code>panel_notice</code>; <code>PanelState.message: Option&lt;(&str, Severity)&gt;</code>; colour by severity via the palette (item 9).</li>
+    <li>Every <code>set_status(</code> call site (about 40) gets a severity; the routine ones ("added:", "saved:", "dispatched:") become Success and are shown in the notice slot for 2 s rather than suppressed, since the slot no longer costs a row.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Replace <code>routine_feedback_is_quiet_but_errors_and_recovery_remain</code> with: Error outlives 10 s of ticks; Info fades; a Warning is not replaced by an Info; the panel height is identical with and without a message; hiding the panel with a pending Error prints one line to the shell area.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="c">
+<h2><span class="num">C</span>Keys, modes and confirmations</h2>
+<p class="section-lede">Who owns the keyboard is the central question of a PTY wrapper. cmdq answers it with six states and four toggles; users need one question ("queue or program?") and one key.</p>
+
+<article class="item" id="i11">
+  <header><span class="id">11</span><h3>One focus-toggle key instead of F2 / Ctrl-Q / Esc Esc / Ctrl-\</h3>
+  <div class="tags"><span class="tag kind">redesign</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p>Four gestures move keystrokes between the queue and the terminal, each with slightly different scope:</p>
+  <table>
+    <thead><tr><th>Key</th><th>What it does today</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>F2</kbd></td><td>Toggles <code>manual_passthrough</code> while a command runs; from a detected program prompt it instead forces the queue open</td><td>app.rs:2677</td></tr>
+      <tr><td><kbd>Ctrl-Q</kbd></td><td>Toggles <code>force_queue</code> at the prompt; forwarded to the program when the editor does not own input</td><td>app.rs:2794</td></tr>
+      <tr><td><kbd>Esc</kbd><kbd>Esc</kbd></td><td>Toggles <code>manual_passthrough</code>; undocumented in help; the first Esc is held for 400 ms</td><td>app.rs:2709</td></tr>
+      <tr><td><kbd>Ctrl-\</kbd></td><td>Sends SIGQUIT when the editor owns input and a command runs, otherwise toggles passthrough</td><td>app.rs:2752</td></tr>
+    </tbody>
+  </table>
+  <p>The hints row makes the inconsistency visible: the same label "↑ Type above" is bound to <kbd>F2</kbd> while running and to <kbd>Ctrl-Q</kbd> when idle (captures 01 and 14). Holding the first Esc for 400 ms also delays Vim-style users' escapes in raw programs.</p>
+  <h4>Proposal</h4>
+  <p>One concept, <b>focus</b>, with two values: <em>queue</em> and <em>terminal</em>. One key, <kbd>Ctrl-Q</kbd>, toggles it in every state, and <kbd>F2</kbd> remains a documented alias. The label is always "Ctrl-Q ↔ terminal" or "Ctrl-Q ↔ queue" depending on where focus is. Internally, <code>force_queue</code> (idle) and <code>manual_passthrough</code> (running) collapse into <code>focus_override: Option&lt;Focus&gt;</code>, cleared on <code>CommandEnd</code> exactly as <code>manual_passthrough</code> is today. <kbd>Ctrl-\</kbd> becomes purely "send SIGQUIT to the running program" and the double-Esc toggle is removed (it stays available as an opt-in config binding for SSH sessions that eat Ctrl-Q, which is the reason it was added).</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>AppState</code>: replace <code>manual_passthrough: bool</code> and <code>force_queue: bool</code> with <code>focus_override: Option&lt;Focus&gt;</code>; <code>effective_passthrough</code> (app.rs:238), <code>panel_should_be_visible</code>, <code>editor_owns_input</code> (app.rs:283) read it.</li>
+    <li><code>src/app.rs</code> · <code>handle_key_with_bytes</code>: delete the Esc-Esc block and the Ctrl-\ toggle branch; merge the F2 and Ctrl-Q branches into <code>toggle_focus(state)</code>.</li>
+    <li><code>src/app.rs</code> · <code>flush_pending_escape_if_due</code> (app.rs:3024) and <code>last_esc_at</code> go away, which also removes the 400 ms Esc hold.</li>
+    <li><code>src/panel.rs</code> · <code>paint_hints</code>: one entry <code>("Ctrl-Q", if focus_terminal { "↔ queue" } else { "↔ terminal" })</code>; header glyph <code>↑</code> becomes the word "terminal".</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Rewrite <code>double_esc_toggles_passthrough</code> and siblings as focus tests; assert Esc reaches a raw child immediately (no hold); assert hints show the same key for the toggle in idle, running and paused states.</p>
+</article>
+
+<article class="item" id="i12">
+  <header><span class="id">12</span><h3>Meta-free and F-key-free alternatives, with macOS Option detection</h3>
+  <div class="tags"><span class="tag kind">fix</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>Three core actions need Alt (<kbd>Alt-S</kbd> condition, <kbd>Alt-U</kbd> undo, <kbd>Alt-↑/↓</kbd> reorder) and three need function keys (<kbd>F1</kbd>–<kbd>F3</kbd>). On a stock macOS Terminal or iTerm2, Option inserts <code>ß</code>, <code>¨</code>, <code>˚</code>; on a MacBook keyboard F-keys need Fn; inside some multiplexers <kbd>F1</kbd> arrives as <code>ESC O P</code> and is mis-parsed. The README acknowledges the Option issue but the product cannot tell the user why <kbd>Alt-S</kbd> just typed a letter.</p>
+  <h4>Proposal</h4>
+  <p>Every action gets a Ctrl-only alternative and the hints show whichever the terminal is known to deliver:</p>
+  <table>
+    <thead><tr><th>Action</th><th>Primary</th><th>Alternative</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Run condition</td><td>Alt-S</td><td>Ctrl-T</td><td>Ctrl-T is readline transpose, rarely used in a draft</td></tr>
+      <tr><td>Undo removal</td><td>Alt-U</td><td>Ctrl-_ (Ctrl-/)</td><td>Emacs undo chord, sends 0x1f</td></tr>
+      <tr><td>Move item</td><td>Alt-↑ / Alt-↓</td><td>Ctrl-↑ / Ctrl-↓ and Shift-↑ / Shift-↓</td><td>crossterm decodes CSI 1;5A / 1;2A</td></tr>
+      <tr><td>Help</td><td>F1</td><td>Ctrl-G, ?</td><td>? already works on an empty draft</td></tr>
+      <tr><td>Focus toggle</td><td>Ctrl-Q</td><td>F2</td><td>see item 11</td></tr>
+      <tr><td>Dismiss notice</td><td>F3</td><td>Esc on an empty draft</td><td>Esc already clears the draft; extend to the notice</td></tr>
+    </tbody>
+  </table>
+  <p>Detection: if the editor receives one of the macOS Option-layer characters (<code>ß ∂ ƒ © ˙ ∆ ˚ ¬ µ ˜ ø π œ ® ß † ¨ √ ∑ ≈ ¥ Ω</code>) as the first character of an otherwise empty draft, show a Warning once per session: "Your terminal sends Option as a character. Use Ctrl-T for the run condition or enable 'Option as Meta' in your terminal." The character is still inserted, so nothing is lost.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/input.rs</code> · <code>LineEditor::handle_key</code> (input.rs:230): add the Ctrl alternatives next to the existing Alt arms; add <code>KeyCode::Up if ctrl || shift</code> for moves.</li>
+    <li><code>src/app.rs</code> · <code>handle_key_with_bytes</code>: F1/F3 alternatives; <code>option_char_hint_shown: bool</code> in <code>AppState</code>.</li>
+    <li><code>src/panel.rs</code> · <code>BINDINGS</code> (item 3): each binding lists both keys; hints prefer the primary unless <code>prefer_ctrl_bindings</code> is set by config or by the detection above.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>input.rs: Ctrl-T toggles the condition; Ctrl-↑ moves; app.rs: typing <code>ß</code> on an empty draft produces the hint once and inserts the character.</p>
+</article>
+
+<article class="item" id="i13">
+  <header><span class="id">13</span><h3>One confirmation gesture, one window, honest wording</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Four double-press confirmations with four windows: clear (<kbd>Ctrl-K</kbd>, 3 s), quit (<kbd>Ctrl-D</kbd>, 3 s), resume in a different directory (<kbd>Ctrl-X</kbd>, 4 s), and the removed double-Esc (400 ms). Clear and quit replace the hints row with "(press again)"; the cwd confirmation instead writes a status sentence. The quit hint does not say that confirming discards the queue.</p>
+  <h4>Proposal</h4>
+  <p>A single <code>PendingConfirm { action, expires_at }</code> with one <code>CONFIRM_WINDOW</code> of 4 s. The hints row always renders it the same way: <code>Ctrl-K again  discard 3 queued</code>, <code>Ctrl-D again  discard 3 queued and quit</code>, <code>Ctrl-X again  run 3 queued here (/tmp) · queued in ~/proj</code>. Any other key withdraws the confirmation (already true for clear and cwd; make quit consistent).</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code>: replace <code>pending_quit_at</code>, <code>pending_clear_at</code>, <code>resume_cwd_confirmation_started_at</code> with <code>pending_confirm: Option&lt;PendingConfirm&gt;</code>; <code>pending_quit_active</code>/<code>pending_clear_active</code> become one helper; <code>toggle_queue_pause</code> (app.rs:3039) and <code>clear_queue</code> (app.rs:3093) use it.</li>
+    <li><code>src/panel.rs</code> · <code>PanelState</code>: <code>pending: Option&lt;(&str key, String description)&gt;</code> replaces <code>pending_quit</code>/<code>pending_clear</code>; <code>paint_hints</code> renders the one shape.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Merge <code>pending_clear_hint_replaces_regular_hints</code> and the quit test into a table-driven test over the three actions; assert the description names the count and the consequence.</p>
+</article>
+
+<article class="item" id="i14">
+  <header><span class="id">14</span><h3>Do not leak Ctrl-X into readline when there is nothing to resume</h3>
+  <div class="tags"><span class="tag kind">fix</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●○○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Capture 27: a <kbd>Ctrl-X</kbd> pressed at an idle prompt after the queue had drained was forwarded to Bash as 0x18. Bash treats it as a chord prefix, so the next character (<code>s</code> of <code>sleep</code>) was consumed silently and the command ran as <code>leep 2</code>. The same happens after any quick queue: users press Ctrl-X reflexively to "start" or "resume" and get a corrupted next command.</p>
+  <h4>Proposal</h4>
+  <p>When <kbd>Ctrl-X</kbd> arrives at an idle prompt, the queue is empty, and the tracked prompt buffer is empty, absorb the key and show an Info message: "nothing queued · Ctrl-Q opens the queue". Users who rely on readline's Ctrl-X chords (Ctrl-X Ctrl-E, Ctrl-X Ctrl-U) can set <code>forward_ctrl_x = true</code> in the config. Never absorb when the prompt buffer is non-empty, since a chord may be intended.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>handle_key_with_bytes</code>, before the <code>!editor_owns</code> forwarding branch (app.rs:2854): <code>if is_ctrl_x(&key) && shell_state == AtPrompt && queue.is_empty() && prompt_buffer.is_empty() && !config.forward_ctrl_x</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>app.rs unit test: Ctrl-X at an empty idle prompt writes nothing to the PTY and sets the message; with a non-empty prompt buffer it is forwarded.</p>
+</article>
+
+<article class="item" id="i15">
+  <header><span class="id">15</span><h3>Queue as next, and move to top or bottom</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>"Run this right after the current command" requires adding the item and then pressing <kbd>Alt-↑</kbd> once per queued item ahead of it. There is no move-to-top or move-to-bottom.</p>
+  <h4>Proposal</h4>
+  <p><kbd>Alt-Enter</kbd> (alternative <kbd>Ctrl-Enter</kbd> where the terminal reports it, else <kbd>Ctrl-J</kbd>) enqueues the draft at the front; the hint reads "Alt-↵ Run next". While editing, <kbd>Alt-Home</kbd>/<kbd>Alt-End</kbd> (alternatives <kbd>Ctrl-Home</kbd>/<kbd>Ctrl-End</kbd>) move the item to the top or bottom. A "queued as next" Success message names the position.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/queue.rs</code>: <code>push_front_with_origin</code>, <code>move_to_top(id)</code>, <code>move_to_bottom(id)</code>.</li>
+    <li><code>src/input.rs</code>: <code>InputAction::EnqueueNext { command, conditional }</code>, <code>MoveEditedToTop</code>, <code>MoveEditedToBottom</code>; bind in <code>handle_key</code>.</li>
+    <li><code>src/app.rs</code> · <code>handle_key_with_bytes</code> action match: mirror the <code>EnqueueCurrent</code> and <code>MoveEditedUp</code> arms.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>queue.rs: front push keeps ids monotonic; move_to_top from index 5 yields index 0. input.rs: Alt-Enter returns <code>EnqueueNext</code>.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="d">
+<h2><span class="num">D</span>Composing and editing the queue</h2>
+<p class="section-lede">The queue editor is a competent line editor (word motion, kill, UTF-8 aware) but it is cut off from everything the shell knows: paths, history, and the commands the user just ran. These items close that gap.</p>
+
+<article class="item" id="i16">
+  <header><span class="id">16</span><h3>Path completion on Tab in the queue editor</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p>Tab returns <code>InputAction::CompletionUnavailable</code> (input.rs:368) and a message. Typing a queued command that touches a file means typing the whole path by hand, which is precisely the moment users fall back to waiting for the prompt. Full shell completion is out of reach (the shell is busy), but filesystem completion needs nothing from the shell.</p>
+  <h4>Proposal</h4>
+  <p>Complete the word under the cursor against the filesystem relative to the shell's current directory (<code>shell_cwd</code>, tracked via OSC 7). Expand <code>~</code>. On one match, insert it and append <code>/</code> for directories. On several, cycle with repeated Tab and show the candidates in the notice slot ("src/  tests/  target/  … 7 more"), or a two-row list when the panel is expanded. Complete the first word against <code>$PATH</code> executables and the items already queued. Commands and flags stay uncompleted, which is honest and predictable.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/complete.rs</code> (new): <code>fn complete(word: &str, cwd: &Path, is_first_word: bool) -&gt; Vec&lt;Candidate&gt;</code>; pure and unit-testable with a temp dir; cache the <code>$PATH</code> listing per session.</li>
+    <li><code>src/input.rs</code>: <code>InputAction::Complete { word_start, word_end }</code> replaces <code>CompletionUnavailable</code>; <code>LineEditor</code> gains <code>completion: Option&lt;CompletionState&gt;</code> for cycling; any non-Tab key clears it.</li>
+    <li><code>src/app.rs</code> · action match: call <code>complete</code> with <code>current_shell_cwd(state)</code>; write candidates into the message slot (item 10) with severity Info and no fade while cycling.</li>
+    <li><code>src/panel.rs</code> · <code>paint_hints</code>: show "Tab Complete" when the draft is non-empty.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>complete.rs: prefix matching, hidden files only with a leading dot, directory suffix, tilde expansion, quoting of spaces. binary_smoke: type <code>cat RE</code> Tab in a temp home containing README.md and assert the dispatched command is <code>cat README.md</code>.</p>
+</article>
+
+<article class="item" id="i17">
+  <header><span class="id">17</span><h3>History recall and search (Ctrl-R) from the shell's history</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p>In the editor, <kbd>↑</kbd>/<kbd>↓</kbd> navigate queued items; there is no way to recall a previous command. Users queue the same <code>make test</code> or <code>git push</code> dozens of times a day and retype it each time. cmdq already sees every dispatched command and every line submitted at the prompt (<code>prompt_buffer</code>).</p>
+  <h4>Proposal</h4>
+  <p>Two sources merged, most recent first: the session's own log (dispatched commands plus lines submitted at the prompt), and the shell's history file read at startup and re-read lazily (<code>$HISTFILE</code>, else <code>~/.zsh_history</code> with extended-format timestamps stripped, <code>~/.bash_history</code>, <code>~/.local/share/fish/fish_history</code>). <kbd>Ctrl-R</kbd> opens an incremental search in the input line (<code>(search) make</code>), Enter accepts into the draft, Esc cancels. <kbd>Ctrl-P</kbd>/<kbd>Ctrl-N</kbd> step through history when the draft is not editing a queued item, so <kbd>↑</kbd>/<kbd>↓</kbd> keep their queue meaning.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/history.rs</code> (new): <code>History::load(kind: ShellKind)</code>, parsers for the three formats, <code>push(cmd)</code>, <code>search(needle) -&gt; impl Iterator</code>; dedupe adjacent.</li>
+    <li><code>src/input.rs</code>: editor mode <code>Search { needle, hit }</code>; keys Ctrl-R, Ctrl-P, Ctrl-N.</li>
+    <li><code>src/app.rs</code>: <code>AppState.history</code>; push in <code>dispatch_next_eligible</code> on <code>Claimed</code> and in <code>update_prompt_buffer_for_forwarded_key</code> (app.rs:3373) on Enter when <code>prompt_buffer_reliable</code>.</li>
+    <li><code>src/panel.rs</code> · <code>input_line</code> (panel.rs:682): render the search prompt.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>history.rs: parse zsh extended lines <code>: 1700000000:0;make test</code>, bash plain lines, fish YAML-ish entries; search is case-insensitive substring. input.rs: Ctrl-R, type, Enter yields the hit in the buffer with cursor at end.</p>
+</article>
+
+<article class="item" id="i18">
+  <header><span class="id">18</span><h3>Split a multi-line paste into separate items when it is a list</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p><code>handle_paste</code> (app.rs:3197) always inserts a multi-line paste as one item to keep heredocs and loops intact. That is correct for blocks, but a pasted runbook (<code>npm ci</code> / <code>npm test</code> / <code>npm run build</code>, one per line) becomes one item that runs as a single shell submission with newlines, which defeats per-item editing, reordering and conditions.</p>
+  <h4>Proposal</h4>
+  <p>After the paste lands in the draft, if every non-blank line passes <code>is_likely_complete_shell_command</code> (app.rs:3644) and none starts a continuation, show an Info message with a one-key offer: "3 lines pasted · Alt-↵ queues them as 3 items". The default (Enter) still queues one block. Splitting strips comments and blank lines and carries the draft's condition to each item.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>handle_paste</code>: after <code>insert_str</code>, compute <code>splittable_lines</code>; store <code>AppState.paste_split_offer: Option&lt;Vec&lt;String&gt;&gt;</code>; clear on any edit.</li>
+    <li><code>src/input.rs</code>: reuse the <code>EnqueueNext</code> key from item 15 as <code>EnqueueSplit</code> when an offer is active.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>app.rs: a three-line paste of complete commands produces the offer; a heredoc paste does not; accepting yields three queued items in order.</p>
+</article>
+
+<article class="item" id="i19">
+  <header><span class="id">19</span><h3>Tri-state run condition and a queue-level stop-on-failure policy</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p><code>QueueItem.conditional: bool</code> expresses "only if the previous succeeded". Two common needs are missing: "only if the previous failed" (open the log, notify, roll back) and "stop everything on the first failure" without marking every item. Today a failed <code>make test</code> followed by an unconditional <code>git push</code> pushes anyway, which is the outcome most users would not want by default.</p>
+  <h4>Proposal</h4>
+  <p>Per item: <code>Condition { Always, IfSuccess, IfFailure }</code>, cycled with the condition key and rendered <code>[if success]</code> / <code>[if failure]</code>. Per queue: <code>on_failure: Continue | Pause</code>, default <code>Pause</code>, toggled from the header and persisted in the config. With <code>Pause</code>, a non-zero exit pauses the queue with a Warning "make test exited 2 · Ctrl-X continues, Alt-R retries"; <code>IfFailure</code> items still run before pausing so cleanup hooks work.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/queue.rs</code> · <code>QueueItem</code>: <code>#[serde(default, alias = "conditional")] condition: Condition</code> with a custom deserializer accepting <code>true</code>/<code>false</code> for old files; <code>Queue.on_failure</code>; <code>pop_next_eligible</code> (queue.rs:205) and <code>claim_next_eligible_if_current</code> (queue.rs:273) evaluate <code>Condition::allows(prev_exit)</code>.</li>
+    <li><code>src/input.rs</code>: <code>LineEditor.condition</code> cycles; <code>InputAction::ToggleChain</code> becomes <code>CycleCondition</code>.</li>
+    <li><code>src/app.rs</code> · <code>handle_command_end</code> (app.rs:2379): apply the policy before <code>dispatch_next_eligible</code>; exit 130 keeps its existing interrupt handling.</li>
+    <li><code>src/panel.rs</code> · <code>queue_row_text</code>, <code>input_prefix</code>: render the three states.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>queue.rs: legacy JSON with <code>"conditional": true</code> loads as <code>IfSuccess</code>; <code>IfFailure</code> runs after exit 1 and is skipped after exit 0. app.rs: policy Pause stops after a failure and leaves the remaining items intact.</p>
+</article>
+
+<article class="item" id="i20">
+  <header><span class="id">20</span><h3>Item annotations: numbers, origin directory, full-text preview</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Rows are <code>›</code>, <code>·</code> or <code>✎</code> plus the command. Each item carries <code>origin_cwd</code> but it is never shown, so the "queue was saved in /other/dir" warning at dispatch is a surprise. Long commands cannot be read without entering edit mode.</p>
+  <h4>Proposal</h4>
+  <p>Prefix rows with a dim index (<code>1</code>…<code>9</code>, then <code>·</code>) so messages can say "skipped #3". Append a dim <code>in ~/api</code> suffix when the item's origin differs from the shell's current directory. While an item is selected, if its text is clipped, use the notice slot to show the remainder or wrap it onto two rows when space allows.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/panel.rs</code> · <code>queue_row_text</code> (panel.rs:642): add index and origin; <code>PanelState.shell_cwd: Option&lt;&Path&gt;</code>.</li>
+    <li><code>src/app.rs</code>: pass <code>current_shell_cwd(state)</code> into every <code>PanelState</code> construction (there are three; consider a <code>fn panel_state(&AppState) -&gt; PanelState</code> helper to deduplicate them first).</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Panel: an item whose origin is <code>/a</code> while cwd is <code>/b</code> renders the suffix; identical origin renders none; the suffix is dropped before the command is clipped on narrow terminals.</p>
+</article>
+
+<article class="item" id="i21">
+  <header><span class="id">21</span><h3>Multi-level undo that names what it restores</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●○○○</span></div></header>
+  <h4>Problem</h4>
+  <p><code>recovery: Vec&lt;(usize, QueueItem)&gt;</code> holds one batch; a delete followed by a clear loses the deleted item forever. The undo hint is a generic "Alt-U Undo" and the restore message counts items but does not name them.</p>
+  <h4>Proposal</h4>
+  <p>A bounded stack of up to ten batches, each tagged with its cause (<code>Deleted</code>, <code>Cleared</code>, <code>Skipped</code>, <code>Interrupted</code>). The hint reads "Alt-U Undo delete" / "Undo clear (12)"; the Success message after restoring names the first command and the count. Restoring keeps the existing behaviour of pausing the queue.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code>: <code>recovery: Vec&lt;RecoveryBatch { cause, items }&gt;</code>; push sites in <code>DeleteEdited</code>, <code>clear_queue</code>, <code>dispatch_next_eligible</code> (skips); <code>restore_removed_commands</code> (app.rs:3129) pops.</li>
+    <li><code>src/panel.rs</code> · <code>PanelState.can_recover</code> becomes <code>recover_label: Option&lt;String&gt;</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Delete then clear then two undos restores both batches in reverse order with original positions; the stack is capped at ten.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="e">
+<h2><span class="num">E</span>Dispatch, execution and feedback</h2>
+<p class="section-lede">Automatic execution is the payoff of the product. Today it is silent: commands run back to back with nothing in scrollback to separate them, nothing tells the user the queue finished, and a failure or interruption leaves the user reconstructing what happened from the output.</p>
+
+<article class="item" id="i22">
+  <header><span class="id">22</span><h3>Separator lines in scrollback and an end-of-queue summary</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>When cmdq dispatches, it writes the command and a newline to the PTY (<code>write_command_to_child</code>, app.rs:2585). The shell echoes it like any typed command, so a five-item queue reads in scrollback as five ordinary prompts with no indication of timing, exit status, or that they were automated. The "dispatched:" status fades in four seconds. There is no closing summary.</p>
+  <h4>Proposal</h4>
+  <p>Before each dispatch, print one dim line into the shell region: <code>── cmdq 2/5 · make test ──</code>. After each queued command ends, print <code>   ↳ exit 0 · 1m12s</code> (red for non-zero). When the batch drains, print <code>── cmdq done · 5 ran · 1 failed (make test) · 4m03s ──</code>. Both are opt-out via config (<code>separators = false</code>) and are written with the tracked shell cursor so they land at the shell's cursor row inside the scrolling region, exactly as forwarded output does.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>dispatch_next_eligible</code>: emit the pre-dispatch line through <code>stdout</code> (the <code>Terminal</code> writer), not the PTY, immediately before <code>write_command_to_child</code>; this requires passing the writer pair into the function or returning an <code>Emit</code> to the caller.</li>
+    <li><code>src/app.rs</code> · <code>handle_osc_event</code> on <code>CommandEnd</code>: if the finished command was cmdq-dispatched (<code>running_command.is_some()</code> from item 8), emit the result line before <code>handle_command_end</code> dispatches the next one.</li>
+    <li><code>src/cursor_tracker.rs</code>: feed the emitted bytes so the tracked cursor stays correct (same path as forwarded output in the main loop).</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>path_a_smoke: with two queued items the output contains both separators in order and the summary counts one failure; with <code>separators = false</code> the output is byte-identical to today.</p>
+</article>
+
+<article class="item" id="i23">
+  <header><span class="id">23</span><h3>Notify when the queue finishes or fails while the window is unfocused</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p>The reason to queue commands is to walk away. Nothing tells the user the queue is done or stuck: no bell, no desktop notification, no title change.</p>
+  <h4>Proposal</h4>
+  <p>On batch completion, on a failure that pauses the queue, and on a cwd block: ring BEL and send an OSC 9 notification (<code>ESC ] 9 ; cmdq: queue done, 5 ran ; BEL</code>), which iTerm2, WezTerm, Ghostty, kitty and Windows Terminal render as a desktop notification; fall back to OSC 777 for rxvt-unicode. Additionally set the window title to <code>cmdq ▶ make test (2/5)</code> while dispatching and restore it after, via OSC 0 with the original title captured through the shell's own title if present. Only notify when the terminal is unfocused: cmdq can request focus reporting for itself (<code>CSI ? 1004 h</code>) and already parses <code>FocusGained</code>/<code>FocusLost</code> events; when the child requests focus reporting the events are forwarded as today.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/notify.rs</code> (new): <code>fn notify(out, kind: Done | Failed | Blocked, summary)</code> choosing the escape by <code>$TERM_PROGRAM</code>/<code>$TERM</code>; <code>fn set_title</code>.</li>
+    <li><code>src/app.rs</code> · <code>AppState.terminal_focused: bool</code> updated in the <code>FocusGained</code>/<code>FocusLost</code> arms of the main loop; enable outer focus reporting after <code>EnableBracketedPaste</code> and disable in <code>restore_terminal</code> (app.rs:3962).</li>
+    <li><code>src/app.rs</code> · <code>handle_command_end</code>: call <code>notify</code> when the batch drains or the failure policy pauses.</li>
+    <li>Config keys: <code>notify = "unfocused" | "always" | "never"</code>, <code>bell = true</code>, <code>title = true</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>path_a_smoke: after a queue drains with a simulated <code>CSI O</code> (focus lost) the output contains BEL and an OSC 9 payload; with focus gained it contains neither; <code>notify = "never"</code> emits nothing. Title escapes are removed on exit.</p>
+</article>
+
+<article class="item" id="i24">
+  <header><span class="id">24</span><h3>Retry: re-queue the interrupted or failed command</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>After <kbd>Ctrl-C</kbd> or a failure the command that was running is gone from the queue. Retrying it means retyping it or finding it in history. The pause message says "Ctrl-X resumes" but resuming skips to the <em>next</em> item, which is rarely what the user wants after fixing the cause.</p>
+  <h4>Proposal</h4>
+  <p>Keep <code>last_dispatched: Option&lt;QueueItem&gt;</code>. While the queue is paused after an interruption or failure, <kbd>Alt-R</kbd> (alternative <kbd>Ctrl-^</kbd>) re-inserts it at the front, paused, with a Success message "re-queued make test at the front · Ctrl-X runs it". The pause message becomes "make test interrupted · Ctrl-X continues with cargo build, Alt-R retries make test".</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>dispatch_next_eligible</code>: set <code>last_dispatched</code> on <code>Claimed</code>; <code>handle_command_end</code>: keep it when pausing, clear on success.</li>
+    <li><code>src/input.rs</code>: <code>InputAction::RetryLast</code>; <code>src/app.rs</code>: handler uses <code>queue.push_front_with_origin</code> from item 15.</li>
+    <li><code>src/panel.rs</code> · hints: "Alt-R Retry" when <code>can_retry</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>app.rs: Ctrl-C then Alt-R puts the interrupted command at index 0 and keeps the queue paused; a successful command clears the retry slot.</p>
+</article>
+
+<article class="item" id="i25">
+  <header><span class="id">25</span><h3>Skipped items stay visible and say why</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>A conditional item whose predecessor failed is removed from the list and moved to recovery; the notice says "1 skipped — previous command did not succeed" without naming the command or the exit code (<code>dispatch_next_eligible</code>, app.rs:2435). If several are skipped in a row the user sees the count change and the list shrink with no record.</p>
+  <h4>Proposal</h4>
+  <p>Keep skipped items in the list for the rest of the batch, rendered dim with a strike marker <code>⊘ [if success] git push · skipped, make test exited 2</code>, not dispatchable, and dropped when the batch drains or the queue is cleared. The message names the command and the cause. Undo restores them as live items as today.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/queue.rs</code> · <code>QueueItem</code>: <code>#[serde(skip)] skipped: Option&lt;SkipReason&gt;</code>; <code>pop_next_eligible</code> and the claim path mark instead of remove; <code>len()</code> stays the live count via a new <code>live_len()</code>, with <code>items()</code> returning both for rendering.</li>
+    <li><code>src/panel.rs</code> · <code>queue_row_text</code>: render the skipped state; skipped rows do not count toward <code>max_queue_visible</code> unless space allows.</li>
+    <li><code>src/app.rs</code>: prune skipped rows in <code>handle_command_end</code> when the queue drains and in <code>clear_queue</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>queue.rs: two skipped items remain in <code>items()</code> and are excluded from <code>front()</code>; panel: a skipped row renders the reason and is dim.</p>
+</article>
+
+<article class="item" id="i26">
+  <header><span class="id">26</span><h3>Show the last exit code so conditionals are predictable</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p><code>last_exit_code</code> drives whether an <code>[if success]</code> item will run, including for a draft submitted at an idle prompt (<code>EnqueueCurrent</code> uses it), but it is never displayed. A user who queues <code>[if success] deploy</code> after a command that quietly failed sees it vanish.</p>
+  <h4>Proposal</h4>
+  <p>The idle header (item 8) shows <code>last exit 0</code> or <code>last exit 2</code> in the warning colour. When the draft's condition is <code>IfSuccess</code> and the last exit was non-zero, the input prefix changes to <code>if success (would skip: last exit 2) ❯</code> so the outcome is known before Enter.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/panel.rs</code> · <code>PanelState.last_exit: Option&lt;i32&gt;</code>; <code>paint_header</code>, <code>input_prefix</code> (panel.rs:659).</li>
+    <li><code>src/app.rs</code>: populate from <code>state.last_exit_code</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Panel: with <code>last_exit = Some(2)</code> and a conditional draft the prefix contains "would skip"; with <code>Some(0)</code> it does not.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="f">
+<h2><span class="num">F</span>Working directory, sessions and persistence</h2>
+<p class="section-lede">0.3 made each session's queue independent, which removed a whole class of cross-terminal surprises. It also left behind machinery that no longer has a job, a startup path that can no longer run, and directories that are never cleaned up.</p>
+
+<article class="item" id="i27">
+  <header><span class="id">27</span><h3>Directory mismatch: offer "run where it was queued"</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>If the shell's directory changes before an item dispatches, the queue pauses with "queue was saved in ~/api; Ctrl-X to run here (~/web)" (capture 24). The only remedy offered is to run in the <em>wrong</em> directory. The user almost always meant the directory they queued from.</p>
+  <h4>Proposal</h4>
+  <p>Two remedies in the confirmation hint: <kbd>Ctrl-X</kbd> "run here" (existing) and <kbd>Alt-X</kbd> "run in ~/api", which dispatches the item as <code>cd '~/api' && &lt;command&gt;</code> using the same single-quote escaping as <code>shell_single_quote</code>. A config option <code>cwd_policy = "ask" | "origin" | "here"</code> lets users who always want origin semantics skip the pause entirely; with <code>origin</code>, items whose origin matches are dispatched bare and only mismatched ones get the prefix.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · <code>dispatch_next_eligible</code>: on <code>BlockedByCwd</code> keep the item and record <code>pending_confirm = ResumeCwd { origin }</code> (item 13); new <code>dispatch_in_origin(state, writer)</code> composes the prefixed command.</li>
+    <li><code>src/app.rs</code> · <code>toggle_queue_pause</code> (app.rs:3039): the second remedy branch.</li>
+    <li><code>src/queue.rs</code> · <code>claim_next_eligible_if_current</code>: accept a <code>CwdPolicy</code> so <code>origin</code> never returns <code>BlockedByCwd</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>binary_smoke <code>queued_command_pauses_after_shell_cd_before_auto_dispatch</code> gains a sibling: after <code>cd</code>, Alt-X runs the command and a subsequent <code>pwd</code> proves the shell is in the origin directory; with <code>cwd_policy = "origin"</code> no pause occurs.</p>
+</article>
+
+<article class="item" id="i28">
+  <header><span class="id">28</span><h3>Reattach an orphaned queue after a crash (replaces the dead restore path)</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p><code>prepare_queue_for_startup</code> (app.rs:1635), <code>active_peer_note</code>, the "restored N commands" message and their tests describe a restore-on-launch flow. Since <code>new_session_path</code> always creates a fresh directory, a supported shell never loads a non-empty queue, so the code cannot run. Meanwhile the genuine case it was for still happens: a terminal window closes or crashes with items queued, and the queue file survives on disk with no way to get it back.</p>
+  <h4>Proposal</h4>
+  <p>On startup, scan <code>queues/</code> for directories with a non-empty <code>queue.json</code> and no live lease (<code>session_lease::active_peer_count</code> already does the liveness check per path). If exactly one exists and is under 24 hours old, load its items into the recovery slot and show an Info message: "3 commands from a previous session · Alt-U restores them paused". Do not auto-restore. If several exist, name the newest and mention the count; <code>cmdq --resume &lt;n&gt;</code> picks another. Delete orphaned files once recovered or after seven days. Remove <code>prepare_queue_for_startup</code>'s restore branch and its tests.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/queue.rs</code>: <code>fn orphaned_sessions(data_dir) -&gt; Vec&lt;(PathBuf, Queue, SystemTime)&gt;</code>.</li>
+    <li><code>src/app.rs</code> · <code>run_with_exit_status</code>: after choosing the new session path, call it; seed <code>state.recovery</code> (item 21's <code>RecoveryBatch { cause: PreviousSession }</code>).</li>
+    <li><code>src/main.rs</code>: <code>--resume [N]</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>binary_smoke: kill a session with SIGKILL while two items are queued; the next session's output contains the offer; Alt-U restores both paused; the orphaned directory is removed afterwards.</p>
+</article>
+
+<article class="item" id="i29">
+  <header><span class="id">29</span><h3>Remove per-session queue directories on exit; sweep stale ones</h3>
+  <div class="tags"><span class="tag kind">fix</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Every launch creates <code>queues/&lt;pid&gt;-&lt;nanos&gt;-0/queue.json</code> plus a <code>.lock</code>. Nothing deletes them: <code>install_signal_cleanup</code> (app.rs:1592) removes the lease file and the synthetic rc directories, and <code>ShellPty::drop</code> removes the rc directories, but the queue directory is not on either list. The data directory inspected for this review held 21 orphaned directories after about a day of use. The <code>sessions/</code> directory has a 24-hour sweep (<code>cleanup_stale_session_dirs</code>, pty.rs); <code>queues/</code> has none.</p>
+  <h4>Proposal</h4>
+  <p>On clean exit with an empty queue, remove the session directory. On exit with items still queued, keep it so item 28 can offer it, and let the same sweep delete it after seven days. Add the queue directory to the signal-cleanup list only when the queue is empty at the time of the signal (the cleanup thread can read the last saved length from a shared atomic). Sweep on startup alongside <code>cleanup_stale_session_dirs</code>.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · end of <code>run_with_exit_status</code> after <code>save_queue_if_dirty</code>: <code>if state.queue.is_empty() { remove_dir_all(queue_path.parent()) }</code>.</li>
+    <li><code>src/app.rs</code> · <code>install_signal_cleanup</code>: pass an <code>Arc&lt;AtomicUsize&gt;</code> of the queued count, updated in <code>save_queue_if_dirty</code>.</li>
+    <li><code>src/queue.rs</code> · <code>new_session_path_in</code>: call a new <code>sweep_stale_queue_dirs(&queues_dir, 7 days)</code> that only deletes directories with an empty or missing queue file, or any directory older than the limit.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>binary_smoke <code>binary_normal_exit_removes_session_lease</code> extended: the queue directory is also gone; a SIGTERM with items queued leaves it; the sweep removes an empty eight-day-old directory and keeps a non-empty two-day-old one.</p>
+</article>
+
+<article class="item" id="i30">
+  <header><span class="id">30</span><h3>Stop idle polling and lease writes unless something can write externally</h3>
+  <div class="tags"><span class="tag kind">fix</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●○○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Each idle session locks and reads its private queue file every 500 ms (<code>sync_queue_from_disk_if_due</code>, app.rs:1785) and rewrites its lease every second (<code>refresh_session_lease_if_due</code>, app.rs:1883). With independent per-session files nothing else writes them, so this is pure disk and wake-up churn: with ten terminal tabs open that is twenty file operations per second on a laptop that is otherwise idle.</p>
+  <h4>Proposal</h4>
+  <p>Make external synchronisation event-driven and opt-in: the CLI in item 31 touches a <code>changed</code> marker (or sends SIGUSR1) when it writes, and the session only re-reads on that signal. Refresh the lease every 30 seconds with a 90-second TTL, which is enough for orphan detection. Keep the merge code, since item 31 needs it, but stop running it on a timer.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code>: <code>QUEUE_SYNC_INTERVAL</code> replaced by a <code>queue_change_signalled: Arc&lt;AtomicBool&gt;</code> set from a SIGUSR1 handler in <code>install_signal_cleanup</code>'s signal set; <code>SESSION_LEASE_REFRESH_INTERVAL = 30 s</code>.</li>
+    <li><code>src/session_lease.rs</code>: <code>LEASE_TTL = 90 s</code>; record the PID so the CLI can signal it.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>Unit: no sync occurs over five seconds of idle ticks; a signalled change triggers exactly one sync. session_lease tests updated for the new TTL.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="g">
+<h2><span class="num">G</span>CLI, saved queues and configuration</h2>
+<p class="section-lede">Everything about cmdq happens inside the panel. Users, editors, tmux bindings and scripts have no way in, repeated pipelines cannot be saved, and every timing constant and key is hard-coded. The queue file format and the merge-on-save machinery already exist; these items expose them.</p>
+
+<article class="item" id="i31">
+  <header><span class="id">31</span><h3><code>cmdq add / list / pause / resume / clear</code> targeting the current session</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-l">effort L</span><span class="tag imp">impact ●●●●●</span></div></header>
+  <h4>Problem</h4>
+  <p>Common wishes cannot be met today: a Makefile target that enqueues the next step; a Vim mapping that queues <code>cargo test</code> for the file being edited; a tmux key that queues a command in the pane's shell; a script that queues follow-ups after it finishes. The queue is only reachable by hand, in the panel.</p>
+  <h4>Proposal</h4>
+  <p>Subcommands that act on the session named by <code>$CMDQ_SESSION</code> (item 4), and refuse with a clear error outside a session unless <code>--session &lt;path&gt;</code> is given:</p>
+<pre><code>cmdq add [--next] [--if-success|--if-failure] -- make test
+cmdq add - &lt; runbook.txt            <span class="c"># one item per line, same split rules as item 18</span>
+cmdq list [--json]                   <span class="c"># index, condition, origin, command</span>
+cmdq pause | resume | clear [--yes]
+cmdq remove &lt;index&gt;
+cmdq wait [--timeout 10m]            <span class="c"># exit when the queue drains; exit 1 if it paused</span></code></pre>
+  <p>The CLI writes through the same locked <code>save_preserving_unseen</code> path (queue.rs) and then signals the session (item 30). An item added from inside the same session must <em>not</em> pause the queue, unlike today's foreign-merge behaviour in <code>apply_queue_merge_status</code> (app.rs:1900); items carry the CLI's own working directory as origin.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/main.rs</code>: switch <code>Cli</code> to a clap subcommand enum; the bare invocation keeps launching a session.</li>
+    <li><code>src/cli.rs</code> (new): locate the session (env, <code>--session</code>, or newest live lease), load, mutate, save, signal.</li>
+    <li><code>src/queue.rs</code>: <code>push_front</code>; <code>fn signal_session(pid)</code> reading the lease record.</li>
+    <li><code>src/app.rs</code> · <code>apply_queue_merge_status</code>: do not pause for <code>unseen_items</code> whose <code>source == Some(session_id)</code>; add <code>source: Option&lt;String&gt;</code> to <code>QueueItem</code> (serde default).</li>
+    <li><code>shell/integration.*</code>: nothing required; document tmux and editor examples in README.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>binary_smoke: inside a hosted shell, <code>cmdq add -- touch a; cmdq add -- touch b; sleep 2</code> results in both files after the sleep; <code>cmdq wait</code> returns 0; <code>cmdq add</code> with no session prints the guidance and exits 2.</p>
+</article>
+
+<article class="item" id="i32">
+  <header><span class="id">32</span><h3>Saved, named queues</h3>
+  <div class="tags"><span class="tag kind">feature</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>Release checklists, deploy sequences and "morning routine" pipelines are the same five commands every time, and they are retyped every time.</p>
+  <h4>Proposal</h4>
+  <p><code>cmdq save &lt;name&gt;</code> writes the current items (commands, conditions, no origins) to <code>~/.config/cmdq/queues/&lt;name&gt;.json</code>; <code>cmdq load &lt;name&gt;</code> appends them, paused, with a Success message "loaded release (5) · Ctrl-X starts". In-panel: <kbd>Ctrl-S</kbd> on an empty draft prompts for a name in the input line; a draft starting with <code>@</code> completes saved queue names (<code>@rel</code> Tab → <code>@release</code>) and Enter loads it. Saved queues are plain JSON so they can be committed to a repo and shared; a project-local <code>.cmdq/queues/</code> is searched first.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/saved.rs</code> (new): <code>SavedQueue { name, items: Vec&lt;{command, condition}&gt; }</code>, list/load/save with atomic writes.</li>
+    <li><code>src/cli.rs</code>: <code>save</code>, <code>load</code>, <code>queues</code> subcommands.</li>
+    <li><code>src/input.rs</code>: editor mode <code>NamePrompt</code>; <code>@</code> completion hooks into item 16's completion state.</li>
+    <li><code>src/app.rs</code>: load path reuses <code>restore_removed_commands</code>'s "append paused" behaviour.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>saved.rs round-trip; app.rs: <code>@release</code> Enter appends five paused items; binary_smoke: <code>cmdq save x</code> then <code>cmdq load x</code> in a fresh session.</p>
+</article>
+
+<article class="item" id="i33">
+  <header><span class="id">33</span><h3>A configuration file and environment overrides</h3>
+  <div class="tags"><span class="tag kind">foundation</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <h4>Problem</h4>
+  <p>Twelve tuning constants live at the top of app.rs (panel delay 1.5 s, eight visible rows, 4 s status fade, confirmation windows) and every key is a literal in <code>handle_key</code>. Users on slow CI-like commands want a longer delay; users who queue constantly want zero delay; people with terminals that eat Ctrl-Q or Alt need to rebind; light-theme users need colours. None of it is adjustable.</p>
+  <h4>Proposal</h4>
+  <p><code>~/.config/cmdq/config.toml</code> (respecting <code>$XDG_CONFIG_HOME</code>), every key optional, with <code>CMDQ_*</code> environment overrides for the scalar ones and a <code>cmdq config --print</code> that shows the effective values and their sources:</p>
+<pre><code><span class="c"># ~/.config/cmdq/config.toml</span>
+[panel]
+delay_ms = 1500          <span class="c"># CMDQ_PANEL_DELAY_MS</span>
+max_rows = 8
+compact = false          <span class="c"># item 6</span>
+startup_hint = true      <span class="c"># item 1</span>
+
+[queue]
+on_failure = "pause"     <span class="c"># item 19: "pause" | "continue"</span>
+cwd_policy = "ask"       <span class="c"># item 27: "ask" | "origin" | "here"</span>
+separators = true        <span class="c"># item 22</span>
+
+[notify]                 <span class="c"># item 23</span>
+when = "unfocused"
+bell = true
+title = true
+
+[keys]                   <span class="c"># item 11/12; any binding may list several keys</span>
+focus = ["ctrl-q", "f2"]
+condition = ["alt-s", "ctrl-t"]
+undo = ["alt-u", "ctrl-_"]
+help = ["f1", "ctrl-g"]
+forward_ctrl_x = false   <span class="c"># item 14</span>
+
+[theme]                  <span class="c"># item 9</span>
+state = "cyan"
+warn = "yellow"</code></pre>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/config.rs</code> (new): <code>Config</code> with <code>serde</code> + <code>toml</code> (new dependency, ~40 KB); <code>Config::load()</code> merges file, env, defaults; a <code>KeyBinding</code> parser producing <code>KeyEvent</code> patterns.</li>
+    <li><code>src/app.rs</code>: <code>AppConfig</code> gains <code>config: Config</code>; the constants become fields read from it; <code>handle_key_with_bytes</code> and <code>LineEditor::handle_key</code> match through <code>config.keys.matches(Action, &key)</code> instead of literals.</li>
+    <li><code>src/panel.rs</code>: hints and help render the configured primary key for each action (item 3's <code>BINDINGS</code> becomes data derived from config).</li>
+    <li><code>src/main.rs</code>: <code>config --print</code>, <code>--config &lt;path&gt;</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>config.rs: missing file yields defaults; env overrides file; an invalid key string produces a startup warning naming the line, not a crash. binary_smoke: <code>CMDQ_PANEL_DELAY_MS=0</code> shows the panel immediately on a quick command.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="h">
+<h2><span class="num">H</span>Diagnostics, copy and edge cases</h2>
+<p class="section-lede">Three smaller items that reduce support load: make the heuristics inspectable, make the wording consistent, and make degraded modes explain themselves.</p>
+
+<article class="item" id="i34">
+  <header><span class="id">34</span><h3>Make input-ownership decisions transparent and loggable</h3>
+  <div class="tags"><span class="tag kind">diagnostics</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Whether a keystroke goes to the queue or the program depends on a termios check (<code>needs_direct_input</code>, pty.rs), a 200-character output-tail heuristic (<code>looks_like_input_prompt</code>, app.rs:458), alt-screen and mouse sniffing, and a 100 ms settling delay. When it guesses wrong the user experiences "my typing disappeared" or "the queue captured my password answer" and has no way to see why. <code>env_logger</code> is wired to stderr, which is the terminal itself, so logging is unusable during a session.</p>
+  <h4>Proposal</h4>
+  <p>Route logs to a file when <code>CMDQ_LOG=&lt;path&gt;</code> (or <code>CMDQ_LOG=1</code> for the state dir) is set, and log every ownership transition with its reason: <code>input → program (termios: ECHO off)</code>, <code>input → program (tail matched "Password:")</code>, <code>input → queue (CommandEnd)</code>. In the panel, when focus is on the program because of a heuristic, the input line names the reason briefly: <code>↑ program is reading input (Password:) · Ctrl-Q for queue</code>. <code>cmdq --doctor</code> (item 2) prints the log location.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/main.rs</code>: configure <code>env_logger</code> with a file target when <code>CMDQ_LOG</code> is set.</li>
+    <li><code>src/app.rs</code> · <code>refresh_auto_passthrough_for_child_modes</code> (app.rs:2312), <code>update_child_input_detection</code> (app.rs:2290), <code>tty_input_requested</code>: <code>log::info!</code> with the reason; store <code>AppState.input_owner_reason: Option&lt;&'static str&gt;</code> for the panel.</li>
+    <li><code>src/panel.rs</code> · <code>input_line</code>: append the reason when present and width allows.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>app.rs: a tail of "Password:" sets the reason string; CommandEnd clears it. binary_smoke: with <code>CMDQ_LOG</code> set, the file contains at least one transition line after a <code>read -p</code> command.</p>
+</article>
+
+<article class="item" id="i35">
+  <header><span class="id">35</span><h3>Message copy: one voice, one key spelling, no leftovers</h3>
+  <div class="tags"><span class="tag kind">polish</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Messages mix styles: "queue paused" (lower-case fragment), "Ctrl-C detected — queue paused. Ctrl-X to resume, Ctrl-K to clear." (sentence with period), "Cleared 12 commands — Alt-U restores paused" (verb first), "clear 3 queued commands? press ^K again to confirm" (caret notation). Keys appear as <code>Ctrl-X</code> in hints and <code>^X</code> in statuses. The Tab message still advertises Alt-S. Glyphs <code>○</code> and <code>↑</code> in the header have no legend outside help.</p>
+  <h4>Proposal</h4>
+  <p>Adopt a four-rule style and apply it in one pass over the roughly forty <code>set_status</code>/<code>activity</code> sites: (1) outcome first, then the next action, separated by a middle dot: <code>Queue paused · Ctrl-X resumes</code>; (2) keys always spelled as in the hints row, generated from the binding table so renames propagate; (3) sentence case, no trailing period, at most 70 columns before the action clause so the outcome survives clipping; (4) name the thing acted on: "Removed make test", "Skipped git push". Replace header glyphs with words at ≥ 60 columns (running / paused / building / editing / terminal) and keep glyphs only for narrow widths.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code>: every <code>set_status(</code> and <code>activity = Some(</code>; the Tab message in the <code>CompletionUnavailable</code> arm is deleted by item 16 anyway.</li>
+    <li><code>src/panel.rs</code> · <code>paint_header</code> (panel.rs:456): width-aware word/glyph choice.</li>
+    <li><code>tests/</code>: string assertions in binary_smoke and app.rs tests updated in the same commit; a new unit test asserts no status string contains <code>^</code> followed by a capital letter.</li>
+  </ul>
+</article>
+
+<article class="item" id="i36">
+  <header><span class="id">36</span><h3>Small-terminal behaviour that explains itself</h3>
+  <div class="tags"><span class="tag kind">edge case</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●○○○</span></div></header>
+  <h4>Problem</h4>
+  <p>Below 5 rows or 20 columns the panel is disabled (<code>terminal_allows_panel</code>, app.rs:1631) and typing goes to the shell. The only message, "terminal too small for queue panel", appears if the user presses <kbd>Ctrl-Q</kbd>; a queue built before the shrink keeps dispatching invisibly, and on a paused queue only <kbd>Ctrl-X</kbd>/<kbd>Ctrl-K</kbd> work with no visible hint (capture 38). Split panes in tmux and small popups hit this regularly.</p>
+  <h4>Proposal</h4>
+  <p>When the panel is suppressed by size and the queue is non-empty or paused, print one dim line in the shell area on the transition ("cmdq: 3 queued, panel hidden (terminal 100×4) · Ctrl-X resume, Ctrl-K clear") and again when the size allows the panel back. Lower the floor to 3 rows by using the compact layout from item 6 automatically. Treat <code>COLUMNS &lt; 20</code> the same way.</p>
+  <h4>Where</h4>
+  <ul class="where">
+    <li><code>src/app.rs</code> · the <code>CtEvent::Resize</code> arm: compare <code>terminal_allows_panel</code> before and after; emit the line through <code>stdout</code> at the tracked cursor.</li>
+    <li><code>src/app.rs</code> · <code>desired_layout</code>: choose compact when <code>term_rows &lt; 8</code>.</li>
+  </ul>
+  <h4>Tests</h4>
+  <p>path_a_smoke <code>tiny_terminal_does_not_reserve_invisible_panel</code> extended: with two items queued the shrink emits the hint line exactly once; growing back re-reserves the panel and emits the return line.</p>
+</article>
+</section>
+
+<!-- ============================================================ -->
+<section id="roadmap">
+<h2><span class="num">02</span>Suggested roadmap</h2>
+<p class="section-lede">Ordered so that foundations land before the features that depend on them, and so that each release is visibly better on its own. Numbers refer to the items above.</p>
+<div class="grid2">
+  <div class="item">
+    <header><span class="id">RELEASE 0.4</span><h3>Foundations and daily friction</h3></header>
+    <ol>
+      <li><b>33</b> config file — everything after this reads from it</li>
+      <li><b>10</b> message model — fixes hidden warnings and the sticky-notice panel</li>
+      <li><b>5</b> stable panel height + <b>9</b> theme-safe colours</li>
+      <li><b>11</b> one focus key + <b>12</b> Ctrl alternatives and Option detection</li>
+      <li><b>8</b> header with running command, elapsed, progress</li>
+      <li><b>13</b> unified confirmations, <b>35</b> copy pass, <b>7</b> counts and ellipses</li>
+      <li><b>29</b> queue-dir cleanup, <b>14</b> Ctrl-X leak, <b>1</b> startup line</li>
+    </ol>
+    <p class="note" style="color:var(--fg2);font-size:14px">Mostly rewrites of existing code paths; the PTY suite already covers the behaviours being preserved. Version bump is warranted by the key changes.</p>
+  </div>
+  <div class="item">
+    <header><span class="id">RELEASE 0.5</span><h3>The queue learns what the shell knows</h3></header>
+    <ol>
+      <li><b>16</b> path completion, <b>17</b> history search</li>
+      <li><b>23</b> notifications and title, <b>22</b> separators and summary</li>
+      <li><b>19</b> tri-state condition and stop-on-failure, <b>24</b> retry, <b>25</b> visible skips, <b>26</b> last exit</li>
+      <li><b>27</b> run where queued, <b>20</b> item annotations, <b>15</b> queue-as-next</li>
+      <li><b>2</b> doctor and in-session health check, <b>34</b> logging, <b>3</b> help rewrite</li>
+    </ol>
+  </div>
+  <div class="item">
+    <header><span class="id">RELEASE 0.6</span><h3>Reaching in from outside</h3></header>
+    <ol>
+      <li><b>4</b> <code>CMDQ_SESSION</code> and state file (small, can ship earlier)</li>
+      <li><b>30</b> event-driven sync (prerequisite for a well-behaved CLI)</li>
+      <li><b>31</b> CLI subcommands, <b>32</b> saved queues</li>
+      <li><b>28</b> orphan reattach, <b>18</b> paste splitting, <b>21</b> multi-level undo, <b>6</b> compact mode, <b>36</b> tiny terminals</li>
+    </ol>
+  </div>
+  <div class="callout insight" style="margin:0">
+    <strong>Three structural moves pay for most of the list.</strong>
+    <ol style="margin:8px 0 0 18px">
+      <li>A <code>Config</code> struct and a binding table replace literal keys and constants (items 3, 11, 12, 33, 35).</li>
+      <li>A <code>Message</code> with severity replaces <code>status</code>/<code>activity</code> and their suppression rules (items 10, 13, 25, 34, 36).</li>
+      <li>A <code>fn panel_state(&AppState) -&gt; PanelState</code> helper collapses the three hand-built copies in app.rs, which every panel item touches (8, 20, 26).</li>
+    </ol>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="keymap">
+<h2><span class="num">03</span>Appendix: current vs proposed key map</h2>
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="Input focus states today and proposed">
+  <text x="20" y="24" class="mono dim">TODAY · six header states, four toggles</text>
+  <rect x="20" y="40" width="150" height="54" rx="6" class="box"/><text x="35" y="62" class="mono">✓ idle</text><text x="35" y="82" class="dim" style="font-size:11px">shell owns keys</text>
+  <rect x="200" y="40" width="150" height="54" rx="6" class="box"/><text x="215" y="62" class="mono">○ building</text><text x="215" y="82" class="dim" style="font-size:11px">Ctrl-Q · queue owns</text>
+  <rect x="380" y="40" width="150" height="54" rx="6" class="box-hi"/><text x="395" y="62" class="mono">▶ running</text><text x="395" y="82" class="dim" style="font-size:11px">after 1.5 s · queue owns</text>
+  <rect x="560" y="40" width="150" height="54" rx="6" class="box"/><text x="575" y="62" class="mono">↑ terminal</text><text x="575" y="82" class="dim" style="font-size:11px">F2 / Esc Esc / Ctrl-\</text>
+  <rect x="740" y="40" width="100" height="54" rx="6" class="box"/><text x="755" y="62" class="mono">Paused</text><text x="755" y="82" class="dim" style="font-size:11px">Ctrl-X</text>
+  <rect x="860" y="40" width="80" height="54" rx="6" class="box"/><text x="875" y="62" class="mono">✎ edit</text><text x="875" y="82" class="dim" style="font-size:11px">↑/↓</text>
+  <path class="stroke" d="M170 67 H200"/><path class="stroke" d="M530 67 H560"/><path class="stroke" d="M350 67 H380"/><path class="stroke" d="M710 67 H740"/>
+  <text x="20" y="150" class="mono dim">PROPOSED · one question, one key</text>
+  <rect x="20" y="166" width="420" height="96" rx="8" class="box-ok"/>
+  <text x="36" y="190" class="mono" fill="#7ee787">focus = queue</text>
+  <text x="36" y="212" class="dim" style="font-size:12px">panel shows: running / idle / paused / editing as words</text>
+  <text x="36" y="232" class="dim" style="font-size:12px">Enter queues (idle: runs), ↑/↓ edit, Ctrl-X pause/start</text>
+  <text x="36" y="252" class="dim" style="font-size:12px">Ctrl-T condition · Ctrl-R history · Tab paths</text>
+  <rect x="520" y="166" width="420" height="96" rx="8" class="box"/>
+  <text x="536" y="190" class="mono" fill="#79c0ff">focus = terminal</text>
+  <text x="536" y="212" class="dim" style="font-size:12px">every key goes to the shell or program</text>
+  <text x="536" y="232" class="dim" style="font-size:12px">auto while alt-screen, mouse capture, raw tty, or a prompt</text>
+  <text x="536" y="252" class="dim" style="font-size:12px">panel stays visible; input line says why</text>
+  <path class="stroke" d="M440 200 H520" marker-end="url(#ar)"/><path class="stroke" d="M520 228 H440" marker-end="url(#ar)"/>
+  <text x="455" y="192" class="mono" style="font-size:11px" fill="#ffb454">Ctrl-Q</text>
+  <text x="444" y="246" class="mono" style="font-size:11px" fill="#ffb454">Ctrl-Q · F2</text>
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#9aa3b2"/></marker></defs>
+</svg>
+<figcaption>The proposed model keeps every automatic hand-off (alt-screen, mouse, raw tty, detected prompts) and reduces the user-facing toggles to one.</figcaption>
+</figure>
+
+<table>
+<thead><tr><th>Action</th><th>Today</th><th>Proposed primary</th><th>Alternative</th><th>Item</th></tr></thead>
+<tbody>
+<tr><td>Queue the draft / run at idle</td><td>Enter</td><td>Enter</td><td>—</td><td></td></tr>
+<tr><td>Queue as next</td><td>—</td><td>Alt-Enter</td><td>Ctrl-J</td><td>15</td></tr>
+<tr><td>Swap focus queue ↔ terminal</td><td>F2 (running), Ctrl-Q (idle), Esc Esc, Ctrl-\</td><td>Ctrl-Q</td><td>F2</td><td>11</td></tr>
+<tr><td>Pause / resume / start</td><td>Ctrl-X</td><td>Ctrl-X</td><td>—</td><td>14</td></tr>
+<tr><td>Run condition</td><td>Alt-S (two states)</td><td>Alt-S (three states)</td><td>Ctrl-T</td><td>12, 19</td></tr>
+<tr><td>Select queued item</td><td>↑ / ↓</td><td>↑ / ↓</td><td>—</td><td></td></tr>
+<tr><td>Move item</td><td>Alt-↑ / Alt-↓</td><td>Alt-↑ / Alt-↓</td><td>Ctrl-↑ / Shift-↑</td><td>12</td></tr>
+<tr><td>Move to top / bottom</td><td>—</td><td>Alt-Home / Alt-End</td><td>Ctrl-Home / Ctrl-End</td><td>15</td></tr>
+<tr><td>Delete item</td><td>Ctrl-D while editing</td><td>Ctrl-D while editing</td><td>Delete on an empty edit</td><td></td></tr>
+<tr><td>Undo</td><td>Alt-U</td><td>Alt-U</td><td>Ctrl-_</td><td>12, 21</td></tr>
+<tr><td>Retry last</td><td>—</td><td>Alt-R</td><td>Ctrl-^</td><td>24</td></tr>
+<tr><td>Clear queue</td><td>Ctrl-K twice</td><td>Ctrl-K twice</td><td>—</td><td>13</td></tr>
+<tr><td>Path completion</td><td>— (notice)</td><td>Tab</td><td>—</td><td>16</td></tr>
+<tr><td>History search / step</td><td>—</td><td>Ctrl-R / Ctrl-P, Ctrl-N</td><td>—</td><td>17</td></tr>
+<tr><td>Compact panel</td><td>—</td><td>Ctrl-O</td><td>—</td><td>6</td></tr>
+<tr><td>Help</td><td>F1, ? on empty draft</td><td>F1</td><td>Ctrl-G, ?</td><td>3, 12</td></tr>
+<tr><td>Dismiss notice</td><td>F3</td><td>Esc on empty draft</td><td>F3</td><td>10, 12</td></tr>
+<tr><td>Interrupt / suspend / SIGQUIT</td><td>Ctrl-C / Ctrl-Z / Ctrl-\</td><td>unchanged</td><td>—</td><td>11</td></tr>
+<tr><td>Quit</td><td>Ctrl-D on empty draft, twice if queued</td><td>unchanged, hint says "discard N"</td><td>—</td><td>13</td></tr>
+</tbody>
+</table>
+</section>
+
+<!-- ============================================================ -->
+<section id="captures">
+<h2><span class="num">04</span>Appendix: captured panel states</h2>
+<p class="section-lede">Verbatim <code>tmux capture-pane</code> output from the installed 0.3.3 binary hosting <code>/bin/bash</code> with <code>PS1='$ '</code>, 100×24, isolated <code>HOME</code>. Colour is not preserved; the layout and wording are exact.</p>
+
+<div class="grid2">
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>01 · panel after 1.5 s of <code>sleep 60</code></div><div class="body"><span class="hd"> ▶ ────────────────────────────────────────────────</span>
+ <span class="key">F2</span> ↑ Type above   <span class="key">Ctrl-C</span> Stop   <span class="key">Alt-S</span> If success   <span class="key">F1</span> Help
+ <span class="sel">❯</span>  <span class="dim">Next command…</span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>14 · after Ctrl-C: same label, different key</div><div class="body"><span class="pz"> Paused ───────────────────────────────────────────</span>
+ <span class="key">Ctrl-X</span> Resume   <span class="key">Ctrl-Q</span> ↑ Type above   ↑/↓ Edit   <span class="key">Ctrl-K</span> Clear
+ ›  echo first
+ ·  [if success] git push
+ ·  make test
+<span class="note">Ctrl-C detected — queue paused. Ctrl-X to resume, Ctrl-K to clear.</span>
+ <span class="sel">❯</span>  <span class="dim">Next command…</span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>03 → 04 · a notice appears, the input line moves</div><div class="body"><span class="hd"> ▶ ────────────────────────────────────────────────</span>
+ <span class="key">Ctrl-X</span> Pause   <span class="key">F2</span> ↑ Type above   ↑/↓ Edit   <span class="key">Ctrl-K</span> Clear
+ ›  echo first
+ <span class="sel">❯</span>  make test<span class="cur"> </span>
+<span class="dim">──────────── after Enter, then "git push" + Alt-S ──────────</span>
+<span class="hd"> ▶ ────────────────────────────────────────────────</span>
+ <span class="key">Ctrl-X</span> Pause   <span class="key">F2</span> ↑ Type above   ↑/↓ Edit   <span class="key">Ctrl-K</span> Clear
+ ›  echo first
+ ·  make test
+<span class="note">Only if previous succeeds — Alt-S changes to Always</span>
+ <span class="sel">❯</span>  if success git push<span class="cur"> </span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>18 · twelve queued: arrow, no count</div><div class="body"><span class="hd"> ○ ↓ ──────────────────────────────────────────────</span>
+ <span class="key">Ctrl-X</span> Start   <span class="key">Ctrl-Q</span> ↑ Type above   ↑/↓ Edit   <span class="key">Ctrl-K</span> Clear
+ ›  echo item 1
+ ·  echo item 2
+ ·  echo item 3
+ ·  echo item 4
+ ·  echo item 5
+ ·  echo item 6
+ ·  echo item 7
+ ·  echo item 8
+ <span class="sel">❯</span>  <span class="dim">Next command…</span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>22 · idle prompt, panel kept open by a sticky notice</div><div class="body"><span class="hd"> ↑ ────────────────────────────────────────────────</span>
+ <span class="key">Ctrl-Q</span> ↓ Type here   <span class="key">Alt-U</span> Undo   <span class="key">F3</span> Hide          <span class="key">F1</span> Help
+<span class="note">Cleared 12 commands — Alt-U restores paused</span>
+ <span class="dim">↑ Typing above</span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>24 · directory changed before dispatch</div><div class="body"><span class="pz"> Paused ───────────────────────────────────────────</span>
+ <span class="key">Ctrl-X</span> Resume   <span class="key">Ctrl-Q</span> ↑ Type above   ↑/↓ Edit   <span class="key">Ctrl-K</span> Clear
+ ›  echo from-here
+<span class="note">queue was saved in /tmp/cmdq-ux; Ctrl-X to run here (/tmp)</span>
+ <span class="sel">❯</span>  <span class="dim">Next command…</span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>27 · Ctrl-X with nothing queued ate the next key</div><div class="body">from-here
+$ <span class="bad">leep</span> 2; read -p 'Name: ' n; echo hi $n
+bash: leep: command not found
+Name:
+<span class="hd"> ↑ ────────────────────────────────────────────────</span>
+ <span class="key">F2</span> ↓ Type here   <span class="key">Ctrl-C</span> Stop                     <span class="key">F1</span> Help
+ <span class="dim">↑ Typing above</span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>40 · quit confirmation hides the consequence</div><div class="body"><span class="hd"> ○ ────────────────────────────────────────────────</span>
+ <span class="key">Ctrl-D</span> Quit (press again)
+ ›  echo pending
+ <span class="sel">❯</span>  <span class="dim">Next command…</span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>33 · draft kept after the command ended (works well)</div><div class="body">$ sleep 3
+$
+<span class="hd"> ✓ ────────────────────────────────────────────────</span>
+ <span class="key">↵</span> Run   <span class="key">Ctrl-Q</span> ↑ Type above   <span class="key">Alt-U</span> Undo   <span class="key">Esc</span> Cancel
+<span class="note">draft kept — Enter runs it now, Esc discards it</span>
+ <span class="sel">❯</span>  echo draft-kept<span class="cur"> </span></div></div>
+<div class="term"><div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>36 · 30 columns (degrades sensibly)</div><div class="body"><span class="hd"> ▶ ───────────────────────────</span>
+ <span class="key">F2</span> ↑ Type above      <span class="key">F1</span> Help
+ <span class="sel">❯</span>  <span class="dim">Next command…</span></div></div>
+</div>
+
+<div class="callout" style="margin-top:24px"><strong>Reproducing the captures.</strong> The harness is a 60-line Python script driving <code>tmux -L cmdqux</code> with <code>HOME</code> and <code>XDG_DATA_HOME</code> pointed at a temp directory, so it never touches real shell configuration or the real queue. It would make a reasonable basis for a screenshot-driven regression suite (compare captures against golden files after stripping timing-dependent text), complementing the byte-level PTY tests.</div>
+</section>
+
+<hr>
+<footer>cmdq UX improvement plan · prepared 13 September 2026 against commit fdd094e (v0.3.3) · sources: src/, shell/, tests/, docs/, demo/renders/, live tmux captures</footer>
+</div>
+</body>
+</html>

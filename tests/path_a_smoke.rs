@@ -694,7 +694,9 @@ fn resize_hidden_layout_updates_child_pty_size() {
 
     assert!(
         h.wait_for(&mut accum, Duration::from_secs(5), |s| {
-            contains(s, b"SIZE:16 70") && contains(s, b"RESIZE_HIDDEN_DONE")
+            // Bash can print a transient job-control diagnostic between the
+            // marker and `stty` output on macOS, so do not require adjacency.
+            contains(s, b"SIZE:") && contains(s, b"16 70") && contains(s, b"RESIZE_HIDDEN_DONE")
         }),
         "child PTY did not see hidden-layout resize; output: {:?}",
         String::from_utf8_lossy(&accum)

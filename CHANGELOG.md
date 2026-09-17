@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- TOML configuration at `~/.config/cmdq/config.toml`, with environment
+  overrides for the panel delay, maximum visible queue rows, and Ctrl-X
+  forwarding behavior.
+- `cmdq config --print` and `--config <path>` for inspecting effective
+  settings and their sources.
+- Queue overflow summaries that report how many commands are visible or
+  hidden, plus ellipses for clipped commands and notices.
+
+### Changed
+
+- Ctrl-X at an empty idle prompt is absorbed by default instead of arming a
+  readline chord that consumes the next typed character. Readline chords are
+  still preserved after prompt text is entered, and the old behavior remains
+  available through configuration.
+- The queue editor's Tab notice no longer advertises an unrelated shortcut.
+
+### Fixed
+
+- Empty per-session queue directories are removed after clean exits and
+  SIGTERM. Startup also removes empty orphan directories and queue snapshots
+  older than seven days while preserving active sessions and recent non-empty
+  recovery data.
+
 ## 0.3.3
 
 Includes the unreleased 0.3.0–0.3.2 changes. Those candidates were not published.
