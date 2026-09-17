@@ -18,7 +18,7 @@
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,6 +43,7 @@ use signal_hook::{
     iterator::Signals,
 };
 
+use crate::config::Config;
 use crate::cursor_tracker::CursorTracker;
 use crate::input::{InputAction, LineEditor};
 use crate::mode_detect;
@@ -72,7 +73,8 @@ const SIGINT_AUTO_PAUSE_WINDOW: Duration = Duration::from_secs(3);
 /// Don't surface the queue panel until a command has been running for at
 /// least this long — short-lived commands (`ls`, `cd`) shouldn't flash UI.
 /// Keys typed within this window pass through to the shell as normal.
-const QUEUE_PANEL_DELAY: Duration = Duration::from_millis(1500);
+#[cfg(test)]
+const QUEUE_PANEL_DELAY: Duration = Duration::from_millis(1_500);
 
 /// How long after the first Ctrl-D do we still treat a second Ctrl-D as
 /// confirmation? After this, the prompt resets and the user has to press it
@@ -122,7 +124,6 @@ const SESSION_LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 const ETX: u8 = 0x03;
 const FS: u8 = 0x1c;
-const MAX_QUEUE_VISIBLE: u16 = 8;
 const MIN_PANEL_COLS: u16 = 20;
 const MIN_PANEL_ROWS: u16 = 5;
 
@@ -144,6 +145,7 @@ struct TerminalRestoreState {
 }
 
 struct AppState {
+    config: Config,
     queue_supported: bool,
     /// Readline can write back a stale PTY size while preparing Bash's prompt.
     wait_for_bash_prompt: bool,
@@ -241,7 +243,7 @@ impl AppState {
 
     fn command_long_running(&self) -> bool {
         self.command_started_at
-            .map(|t| t.elapsed() >= QUEUE_PANEL_DELAY)
+            .map(|t| t.elapsed() >= Duration::from_millis(self.config.panel.delay_ms))
             .unwrap_or(false)
     }
 
@@ -353,7 +355,8 @@ impl AppState {
 
     fn activate_queue_for_running_command(&mut self) {
         if matches!(self.shell_state, ShellState::Running) {
-            self.command_started_at = Some(Instant::now() - QUEUE_PANEL_DELAY);
+            self.command_started_at =
+                Some(Instant::now() - Duration::from_millis(self.config.panel.delay_ms));
         }
     }
 
@@ -579,6 +582,15 @@ pub fn run(cfg: AppConfig) -> Result<()> {
 
 /// Run a session and preserve the hosted shell's exit status for CLI callers.
 pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
+    let loaded = Config::load(None);
+    for warning in loaded.warnings {
+        eprintln!("cmdq: {warning}");
+    }
+    run_with_config_exit_status(cfg, loaded.config)
+}
+
+/// Run a session with an already-loaded effective configuration.
+pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32> {
     anyhow::ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "cmdq needs an interactive terminal on stdin and stdout; run cmdq directly in your terminal"
@@ -694,6 +706,7 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
         let _ = restore_terminal(&cleanup_for_guard);
     });
     let session_lease_io = Arc::new(Mutex::new(()));
+    let queued_count = Arc::new(AtomicUsize::new(queue.len()));
     install_signal_cleanup(
         pending_signals,
         cleanup_state.clone(),
@@ -702,6 +715,8 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
             .map(|lease| lease.path().to_path_buf()),
         pty.session_dirs().to_vec(),
         session_lease_io.clone(),
+        Some(queue_path.clone()),
+        queued_count.clone(),
     )
     .context("install signal cleanup")?;
     let mut stdout = Terminal::new();
@@ -727,6 +742,7 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
 
     let has_startup_status = startup_status.is_some();
     let mut state = AppState {
+        config,
         queue_supported,
         wait_for_bash_prompt: crate::shell_integration::ShellKind::detect_from_path(&shell)
             == crate::shell_integration::ShellKind::Bash,
@@ -1174,7 +1190,7 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
                             pending_quit: state.pending_quit_active(),
                             pending_clear: state.pending_clear_active(),
                             show_help: state.show_help,
-                            max_queue_visible: MAX_QUEUE_VISIBLE,
+                            max_queue_visible: state.config.panel.max_rows,
                         };
                         panel::reflowed_panel_height(&view, height, old_cols, new_cols)
                     } else {
@@ -1335,6 +1351,7 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
 
         if state.queue_supported {
             save_queue_if_dirty(&mut state, &queue_path);
+            queued_count.store(state.queue.len(), Ordering::Release);
             sync_queue_from_disk_if_due(&mut state, &queue_path, &mut last_queue_sync);
         }
         refresh_session_lease_if_due(
@@ -1368,7 +1385,7 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
                 pending_quit: state.pending_quit_active(),
                 pending_clear: state.pending_clear_active(),
                 show_help: state.show_help,
-                max_queue_visible: MAX_QUEUE_VISIBLE,
+                max_queue_visible: state.config.panel.max_rows,
             };
             let cursor_in_input = state.editor_owns_input();
             let key = panel_render_key(
@@ -1399,7 +1416,12 @@ pub fn run_with_exit_status(cfg: AppConfig) -> Result<u32> {
     };
 
     save_queue_if_dirty(&mut state, &queue_path);
+    queued_count.store(state.queue.len(), Ordering::Release);
     let _ = pty.kill();
+    drop(session_lease);
+    if state.queue_supported && state.queue.is_empty() {
+        queue::remove_session_dir(&queue_path);
+    }
     result
 }
 
@@ -1595,6 +1617,8 @@ fn install_signal_cleanup(
     session_lease_path: Option<PathBuf>,
     session_dirs: Vec<PathBuf>,
     session_lease_io: Arc<Mutex<()>>,
+    queue_path: Option<PathBuf>,
+    queued_count: Arc<AtomicUsize>,
 ) -> Result<()> {
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
@@ -1611,6 +1635,11 @@ fn install_signal_cleanup(
             for dir in &session_dirs {
                 let _ = std::fs::remove_dir_all(dir);
             }
+            if queued_count.load(Ordering::Acquire) == 0
+                && let Some(path) = queue_path.as_deref()
+            {
+                queue::remove_session_dir(path);
+            }
             std::process::exit(128 + signal);
         }
     });
@@ -1624,6 +1653,8 @@ fn install_signal_cleanup(
     _session_lease_path: Option<PathBuf>,
     _session_dirs: Vec<PathBuf>,
     _session_lease_io: Arc<Mutex<()>>,
+    _queue_path: Option<PathBuf>,
+    _queued_count: Arc<AtomicUsize>,
 ) -> Result<()> {
     Ok(())
 }
@@ -1968,7 +1999,7 @@ fn desired_layout(state: &AppState, term_rows: u16) -> PanelLayout {
         pending_quit: state.pending_quit_active(),
         pending_clear: state.pending_clear_active(),
         show_help: state.show_help,
-        max_queue_visible: MAX_QUEUE_VISIBLE,
+        max_queue_visible: state.config.panel.max_rows,
     };
     let h = panel::panel_height(&view, term_rows).min(term_rows.saturating_sub(2));
     if h == 0 {
@@ -2851,6 +2882,21 @@ fn handle_key_with_bytes(
         }
     }
 
+    // At an empty prompt Ctrl-X is almost always a reflex to start or resume
+    // the queue. Forwarding it makes readline wait for a chord and silently
+    // consumes the next character. Preserve readline chords once the user has
+    // begun typing, and allow the legacy behavior to be configured explicitly.
+    if !editor_owns
+        && is_ctrl_x(&key)
+        && matches!(state.shell_state, ShellState::AtPrompt)
+        && state.queue.is_empty()
+        && state.prompt_buffer.is_empty()
+        && !state.config.keys.forward_ctrl_x
+    {
+        state.set_status("Nothing queued · Ctrl-Q opens the queue");
+        return KeyOutcome::Continue;
+    }
+
     if !editor_owns {
         let was_child_input = state.child_input_prompt_active();
         let was_any_key_prompt = matches!(state.shell_state, ShellState::Running)
@@ -2905,9 +2951,9 @@ fn handle_key_with_bytes(
     let action = state.editor.handle_key(key, &state.queue);
     match action {
         InputAction::Nothing => {}
-        InputAction::CompletionUnavailable => state.set_status(
-            "Completion is not available in the queue — Alt-S changes the run condition",
-        ),
+        InputAction::CompletionUnavailable => {
+            state.set_status("Completion is not available in the queue")
+        }
         InputAction::FinishEditFirst => {
             state.set_status("Unsaved changes — Enter saves, Esc cancels before switching items")
         }
@@ -4032,6 +4078,7 @@ pub(crate) mod tests {
 
     fn make_state() -> AppState {
         AppState {
+            config: Config::default(),
             queue_supported: true,
             wait_for_bash_prompt: false,
             pending_bash_exit: None,
@@ -7008,6 +7055,49 @@ pub(crate) mod tests {
         assert!(!s.queue.paused);
         assert!(matches!(s.shell_state, ShellState::Running));
     }
+
+    #[test]
+    fn ctrl_x_at_an_empty_prompt_is_absorbed() {
+        let mut s = make_state();
+        s.shell_state = ShellState::AtPrompt;
+        s.command_started_at = None;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            &mut s,
+            &mut w,
+        );
+
+        assert!(buf.lock().unwrap().is_empty());
+        assert_eq!(s.status, "Nothing queued · Ctrl-Q opens the queue");
+    }
+
+    #[test]
+    fn ctrl_x_forwarding_can_be_configured_or_preserved_for_a_prompt_chord() {
+        for configure_forwarding in [false, true] {
+            let mut s = make_state();
+            s.shell_state = ShellState::AtPrompt;
+            s.command_started_at = None;
+            s.config.keys.forward_ctrl_x = configure_forwarding;
+            if !configure_forwarding {
+                s.prompt_buffer = "echo ".into();
+                s.prompt_cursor = s.prompt_buffer.len();
+            }
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
+
+            handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                &mut s,
+                &mut w,
+            );
+
+            assert_eq!(&*buf.lock().unwrap(), b"\x18");
+        }
+    }
+
     #[test]
     fn running_an_idle_draft_captures_immediate_followup_typing() {
         let mut s = make_state();

@@ -9,6 +9,16 @@ pub(crate) fn xdg_data_home() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME").and_then(xdg_data_home_from_os)
 }
 
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .and_then(xdg_data_home_from_os)
+        .or_else(|| {
+            dirs::home_dir()
+                .and_then(absolute_path)
+                .map(|home| home.join(".config"))
+        })
+}
+
 pub(crate) fn xdg_data_home_from_os(dir: OsString) -> Option<PathBuf> {
     if dir.is_empty() {
         return None;

@@ -2,6 +2,7 @@
 //! directory and external tooling can use the same modules the binary uses.
 
 pub mod app;
+pub mod config;
 pub mod cursor_tracker;
 pub mod input;
 pub mod mode_detect;

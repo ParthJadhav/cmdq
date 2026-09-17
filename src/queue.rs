@@ -15,10 +15,13 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+
+const STALE_QUEUE_DIR_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueueItem {
@@ -743,6 +746,7 @@ fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
     let queues_dir = data_dir.join("queues");
     std::fs::create_dir_all(&queues_dir)
         .with_context(|| format!("creating queue directory {}", queues_dir.display()))?;
+    sweep_stale_queue_dirs_at(&queues_dir, SystemTime::now());
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -756,6 +760,58 @@ fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
         }
     }
     unreachable!("session directory counter exhausted")
+}
+
+/// Remove the directory owned by a per-session queue. This is intentionally
+/// best-effort: failure to tidy state must not turn a successful shell exit
+/// into an application error.
+pub fn remove_session_dir(queue_path: &Path) {
+    if queue_path.file_name().and_then(|name| name.to_str()) != Some("queue.json") {
+        return;
+    }
+    let Some(session_dir) = queue_path.parent() else {
+        return;
+    };
+    if session_dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        != Some("queues")
+    {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(session_dir);
+}
+
+fn sweep_stale_queue_dirs_at(queues_dir: &Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(queues_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let queue_path = dir.join("queue.json");
+        if crate::session_lease::active_peer_count(&queue_path).unwrap_or(0) > 0 {
+            continue;
+        }
+        let is_empty = match std::fs::read(&queue_path) {
+            Ok(bytes) => serde_json::from_slice::<Queue>(&bytes)
+                .map(|queue| queue.is_empty())
+                .unwrap_or(false),
+            Err(error) if error.kind() == ErrorKind::NotFound => true,
+            Err(_) => false,
+        };
+        let is_stale = std::fs::metadata(&dir)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_QUEUE_DIR_AGE);
+        if is_empty || is_stale {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 /// Legacy shared persistence path: `$XDG_DATA_HOME/cmdq/queue.json`,
@@ -1662,5 +1718,63 @@ mod tests {
 
         assert!(q.is_empty());
         assert!(warning.unwrap().contains("could not read queue file"));
+    }
+
+    #[test]
+    fn stale_queue_sweep_removes_empty_and_old_orphans() {
+        let temp = tempdir().unwrap();
+        let queues = temp.path().join("queues");
+        let empty_dir = queues.join("empty");
+        let recent_dir = queues.join("recent");
+        let old_dir = queues.join("old");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        std::fs::create_dir_all(&recent_dir).unwrap();
+        std::fs::create_dir_all(&old_dir).unwrap();
+        Queue::new().save(&empty_dir.join("queue.json")).unwrap();
+        let mut nonempty = Queue::new();
+        nonempty.push("echo keep", false);
+        nonempty.save(&recent_dir.join("queue.json")).unwrap();
+        nonempty.save(&old_dir.join("queue.json")).unwrap();
+
+        sweep_stale_queue_dirs_at(&queues, SystemTime::now());
+        assert!(!empty_dir.exists());
+        assert!(recent_dir.exists());
+        assert!(old_dir.exists());
+
+        sweep_stale_queue_dirs_at(
+            &queues,
+            SystemTime::now() + STALE_QUEUE_DIR_AGE + Duration::from_secs(1),
+        );
+        assert!(!recent_dir.exists());
+        assert!(!old_dir.exists());
+    }
+
+    #[test]
+    fn stale_queue_sweep_keeps_an_active_empty_session() {
+        let temp = tempdir().unwrap();
+        let queues = temp.path().join("queues");
+        let active_dir = queues.join("active");
+        let queue_path = active_dir.join("queue.json");
+        Queue::new().save(&queue_path).unwrap();
+        let _lease = crate::session_lease::SessionLease::start(&queue_path, None).unwrap();
+
+        sweep_stale_queue_dirs_at(&queues, SystemTime::now());
+        assert!(active_dir.exists());
+    }
+
+    #[test]
+    fn remove_session_dir_only_accepts_owned_queue_paths() {
+        let temp = tempdir().unwrap();
+        let owned = temp.path().join("queues").join("session");
+        std::fs::create_dir_all(&owned).unwrap();
+        let queue_path = owned.join("queue.json");
+        std::fs::write(&queue_path, b"{}").unwrap();
+        remove_session_dir(&queue_path);
+        assert!(!owned.exists());
+
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        remove_session_dir(&unrelated.join("queue.json"));
+        assert!(unrelated.exists());
     }
 }

@@ -377,7 +377,7 @@ fn paint_normal(
             out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
         }
         let text = queue_row_text(view, i, item);
-        out.queue(Print(clip_to_width(&text, total_cols as usize)))?;
+        out.queue(Print(clip_with_ellipsis(&text, total_cols as usize)))?;
         out.queue(SetAttribute(crossterm::style::Attribute::Reset))?;
         out.queue(ResetColor)?;
         row += 1;
@@ -395,7 +395,7 @@ fn paint_normal(
         out.queue(MoveTo(0, row))?;
         out.queue(Clear(ClearType::CurrentLine))?;
         out.queue(SetForegroundColor(Color::Yellow))?;
-        out.queue(Print(clip_to_width(
+        out.queue(Print(clip_with_ellipsis(
             &display_control_chars(activity),
             total_cols as usize,
         )))?;
@@ -475,10 +475,19 @@ fn paint_header(
     let mut header = format!(" {state} ");
     if let Some((first, last, total)) = queue_overflow(view, list_capacity) {
         if first > 1 {
-            header.push_str("↑ ");
-        }
-        if last < total {
-            header.push_str("↓ ");
+            header.push_str(&format!("{first}–{last} of {total}"));
+            if first > 1 {
+                header.push_str(" ↑");
+            }
+            if last < total {
+                header.push_str(" ↓");
+            }
+            header.push(' ');
+        } else {
+            header.push_str(&format!(
+                "{total} queued · {} more ↓ ",
+                total.saturating_sub(last)
+            ));
         }
     }
     let header_width = display_width(&header);
@@ -880,6 +889,18 @@ fn clip_to_width(s: &str, max_width: usize) -> String {
     }
 }
 
+fn clip_with_ellipsis(s: &str, max_width: usize) -> String {
+    if display_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut clipped = clip_to_width(s, max_width - 1);
+    clipped.push('…');
+    clipped
+}
+
 fn input_window(buffer: &str, cursor: usize, max_width: usize) -> (String, usize) {
     if max_width == 0 {
         return (String::new(), 0);
@@ -958,6 +979,14 @@ mod tests {
     fn clip_to_width_never_splits_wide_chars() {
         assert_eq!(clip_to_width("ab漢字", 4), "ab漢");
         assert_eq!(display_width(&clip_to_width("ab漢字", 4)), 4);
+    }
+
+    #[test]
+    fn clipped_rows_end_with_an_ellipsis_without_splitting_wide_chars() {
+        assert_eq!(clip_with_ellipsis("abcdef", 4), "abc…");
+        assert_eq!(clip_with_ellipsis("ab漢字", 4), "ab…");
+        assert_eq!(display_width(&clip_with_ellipsis("ab漢字", 4)), 3);
+        assert_eq!(clip_with_ellipsis("abcdef", 0), "");
     }
 
     #[test]
@@ -1199,7 +1228,7 @@ mod tests {
         paint_header(&mut out, &view, 100, 8).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
         assert!(
-            printable.starts_with(" ▶ ↓ ") && !printable.contains("12"),
+            printable.starts_with(" ▶ 12 queued · 4 more ↓ "),
             "header={printable:?}"
         );
 
@@ -1209,7 +1238,7 @@ mod tests {
         paint_header(&mut out, &view, 100, 8).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
         assert!(
-            printable.starts_with(" ✎ ↑ ") && !printable.contains("12"),
+            printable.starts_with(" ✎ 5–12 of 12 ↑ "),
             "header={printable:?}"
         );
         assert!(!printable.contains("saved: cmd 11"), "header={printable:?}");

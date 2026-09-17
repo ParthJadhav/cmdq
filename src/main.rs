@@ -1,11 +1,28 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
-use cmdq::{app, shell_integration};
+use cmdq::{app, config::Config, shell_integration};
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Inspect cmdq configuration.
+    Config {
+        /// Print the effective configuration and its sources.
+        #[arg(long)]
+        print: bool,
+    },
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "cmdq", version, about = "A PTY-hosted command queue.", long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Read configuration from this path instead of the platform default.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
+
     /// Shell to spawn (defaults to $SHELL or /bin/sh).
     #[arg(long)]
     shell: Option<String>,
@@ -42,6 +59,19 @@ fn main() -> Result<std::process::ExitCode> {
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
-    app::run_with_exit_status(app::AppConfig { shell: cli.shell })
+    let loaded = Config::load(cli.config.as_deref());
+    for warning in &loaded.warnings {
+        eprintln!("cmdq: {warning}");
+    }
+    if let Some(Command::Config { print }) = cli.command {
+        if print {
+            print!("{}", loaded.print_effective());
+        } else {
+            println!("{}", loaded.path.display());
+        }
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+
+    app::run_with_config_exit_status(app::AppConfig { shell: cli.shell }, loaded.config)
         .map(|status| std::process::ExitCode::from(status.min(255) as u8))
 }
