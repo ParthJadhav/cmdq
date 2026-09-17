@@ -436,7 +436,7 @@ jobs:
           cargo install cmdq --version "=${GITHUB_REF_NAME#v}" --locked --root "$root"
           test "$("$root/bin/cmdq" --version)" = "cmdq ${GITHUB_REF_NAME#v}"
           CMDQ_TEST_BINARY="$root/bin/cmdq" cargo test --locked --release --test shell_matrix
-      - uses: Homebrew/actions/setup-homebrew@master
+      - uses: Homebrew/actions/setup-homebrew@2026.09.13.1
       - name: Test Homebrew installation
         shell: bash
         run: |
