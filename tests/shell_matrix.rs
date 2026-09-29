@@ -297,6 +297,63 @@ fn queue_lifecycle(shell: &str) {
     s.expect_file("second", "second");
 }
 
+#[test]
+fn multiline_queue_item_uses_its_final_status_for_chaining() {
+    for shell in ["bash", "zsh", "fish"] {
+        let Some(mut s) = Session::new(shell) else {
+            continue;
+        };
+        s.send(b"\x11\x1b[200~true\nsleep 0.2\nfalse\x1b[201~\r");
+        s.send(b"printf wrong > should-not-run\x1bs\r");
+        s.send(b"printf done > multiline-done\r\x18");
+        s.expect_file("multiline-done", "done");
+        assert!(
+            !s.file("should-not-run").exists(),
+            "{shell}: chained against an intermediate line instead of the whole item"
+        );
+    }
+}
+
+#[test]
+fn queued_blocks_preserve_literals_and_shell_state() {
+    for shell in ["bash", "zsh", "fish"] {
+        let Some(mut s) = Session::new(shell) else {
+            continue;
+        };
+        let assignment = if shell == "fish" {
+            "set -g CMDQ_BLOCK_VALUE kept"
+        } else {
+            "CMDQ_BLOCK_VALUE=kept"
+        };
+        s.send(
+            format!("\x11\x1b[200~{assignment}\nprintf '%s' 'a\tb' > literal\x1b[201~\r")
+                .as_bytes(),
+        );
+        s.send(b"printf %s \"$CMDQ_BLOCK_VALUE\" > block-value\r\x18");
+        s.expect_file("literal", "a\tb");
+        s.expect_file("block-value", "kept");
+        s.drain(Duration::from_millis(150));
+        s.send(b"\x11printf %s value\\  > trailing-space\r\x18");
+        s.expect_file("trailing-space", "value ");
+    }
+}
+
+#[test]
+fn integration_paths_preserve_quotes_and_backslashes_in_all_shells() {
+    for shell in ["bash", "zsh", "fish"] {
+        let dir = tempfile::Builder::new()
+            .prefix("cmdq-quote'back\\\\")
+            .tempdir()
+            .unwrap();
+        let Some(mut s) = Session::new_in(shell, "PROMPT='MATRIX> '\n", std::sync::Arc::new(dir))
+        else {
+            continue;
+        };
+        s.send(b"\x11printf ready > path-result\r\x18");
+        s.expect_file("path-result", "ready");
+    }
+}
+
 fn direct_input(shell: &str) {
     let Some(mut s) = Session::new(shell) else {
         return;

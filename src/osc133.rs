@@ -50,6 +50,7 @@ pub struct Detector {
     body: Vec<u8>,
     sequence_start: Option<usize>,
     cmdq_only: bool,
+    overflowed: bool,
 }
 
 impl Default for Detector {
@@ -65,6 +66,7 @@ impl Detector {
             body: Vec::new(),
             sequence_start: None,
             cmdq_only: false,
+            overflowed: false,
         }
     }
 
@@ -113,7 +115,10 @@ impl Detector {
                 .body
                 .split(|b| *b == b';')
                 .any(|part| part == b"cmdq=1");
-        if allowed && let Some(ev) = parse_osc(&self.body) {
+        if !self.overflowed
+            && allowed
+            && let Some(ev) = parse_osc(&self.body)
+        {
             out.push(LocatedEvent {
                 event: ev,
                 start: self.sequence_start.unwrap_or(0),
@@ -121,6 +126,7 @@ impl Detector {
             });
         }
         self.body.clear();
+        self.overflowed = false;
         self.sequence_start = None;
         self.state = State::Normal;
     }
@@ -138,6 +144,7 @@ impl Detector {
             State::AfterEsc => match b {
                 b']' => {
                     self.body.clear();
+                    self.overflowed = false;
                     State::InOsc
                 }
                 ESC => {
@@ -159,6 +166,8 @@ impl Detector {
                 } else {
                     if self.body.len() < OSC_BODY_LIMIT {
                         self.body.push(b);
+                    } else {
+                        self.overflowed = true;
                     }
                     State::InOsc
                 }
@@ -264,6 +273,15 @@ mod tests {
     #[test]
     fn detects_command_start_bel() {
         assert_eq!(events(b"\x1b]133;C\x07"), vec![Event::CommandStart]);
+    }
+
+    #[test]
+    fn oversized_markers_are_ignored_instead_of_truncated() {
+        let mut detector = Detector::for_cmdq();
+        let mut bytes = b"\x1b]7;file://localhost/".to_vec();
+        bytes.extend(std::iter::repeat_n(b'a', OSC_BODY_LIMIT));
+        bytes.extend_from_slice(b"\x07\x1b]133;C;cmdq=1\x07");
+        assert_eq!(detector.feed(&bytes), vec![Event::CommandStart]);
     }
 
     #[test]

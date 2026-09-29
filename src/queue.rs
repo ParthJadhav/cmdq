@@ -1,7 +1,7 @@
 //! Queue data model + persistence.
 //!
 //! The queue is an ordered list of pending commands. Each item has a unique id
-//! (monotonic), a command string, and a flag for "only run if previous
+//! (increasing until u64 exhaustion), a command string, and a flag for "only run if previous
 //! succeeded" (conditional). Persistence uses a JSON file under the user's
 //! data dir. Each cmdq launch owns a separate file; saved commands are never
 //! automatically loaded into a different shell session.
@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -22,6 +22,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 const STALE_QUEUE_DIR_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const EMPTY_QUEUE_DIR_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueueItem {
@@ -35,6 +36,7 @@ pub struct QueueItem {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Queue {
+    #[serde(deserialize_with = "deserialize_unique_items")]
     items: Vec<QueueItem>,
     next_id: u64,
     #[serde(default)]
@@ -42,6 +44,25 @@ pub struct Queue {
     /// When true, the runtime will not auto-dispatch on CommandEnd.
     #[serde(default)]
     pub paused: bool,
+}
+
+fn deserialize_unique_items<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<QueueItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let items = Vec::<QueueItem>::deserialize(deserializer)?;
+    let mut ids = HashSet::new();
+    for item in &items {
+        if !ids.insert(item.id) {
+            return Err(serde::de::Error::custom(format!(
+                "duplicate queue item ID {}",
+                item.id
+            )));
+        }
+    }
+    Ok(items)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -117,8 +138,13 @@ impl Queue {
         conditional: bool,
         origin_cwd: Option<PathBuf>,
     ) -> u64 {
+        // A persisted counter can reach u64::MAX. Wrap and skip live IDs
+        // instead of panicking in debug builds or reusing an ID in release.
+        while self.items.iter().any(|item| item.id == self.next_id) {
+            self.next_id = self.next_id.wrapping_add(1);
+        }
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1);
         self.items.push(QueueItem {
             id,
             command: command.into(),
@@ -351,24 +377,34 @@ impl Queue {
         known_items: &mut Vec<QueueItem>,
         known_paused: &mut bool,
     ) -> Result<()> {
-        with_queue_file_lock(path, || {
+        let result = with_queue_file_lock(path, || {
             let mut merge = SaveMerge::default();
             let mut disk = self.read_disk_snapshot_for_merge(path, &mut merge)?;
-            if !disk.items.iter().any(|existing| existing.id == item.id) {
-                disk.items.insert(0, item);
-            }
-            disk.paused = true;
-            disk.next_id = disk.next_id.max(
-                disk.max_item_id()
-                    .map(|id| id.saturating_add(1))
-                    .unwrap_or(0),
-            );
+            disk.restore_item_front(item.clone());
             disk.save_snapshot_unlocked(path)?;
             *self = disk;
             *known_items = self.item_snapshot();
             *known_paused = self.paused;
             Ok(())
-        })
+        });
+        if result.is_err() {
+            // The command was already removed by the claim. Retain it in
+            // memory, paused, even if the disk disappears during rollback.
+            self.restore_item_front(item);
+        }
+        result
+    }
+
+    fn restore_item_front(&mut self, mut item: QueueItem) {
+        if !self.items.contains(&item) {
+            let mut used = self.item_ids();
+            if used.contains(&item.id) {
+                item.id = next_available_id(&mut used, &mut self.next_id);
+            }
+            self.items.insert(0, item);
+        }
+        self.paused = true;
+        self.backfill_item_origins();
     }
 
     fn save_snapshot_unlocked(&self, path: &Path) -> Result<()> {
@@ -378,8 +414,23 @@ impl Queue {
         }
         let tmp = unique_temp_path(path);
         let data = serde_json::to_vec(self)?;
-        std::fs::write(&tmp, data)
-            .with_context(|| format!("writing temp file {}", tmp.display()))?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Queued command arguments can contain credentials. Keep both
+            // the temporary file and the final snapshot private to its owner.
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .with_context(|| format!("creating temp file {}", tmp.display()))?;
+        if let Err(error) = file.write_all(&data) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error).with_context(|| format!("writing temp file {}", tmp.display()));
+        }
+        drop(file);
         match std::fs::rename(&tmp, path) {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -633,7 +684,7 @@ fn unique_temp_path(path: &Path) -> PathBuf {
 fn next_available_id(used: &mut HashSet<u64>, next_id: &mut u64) -> u64 {
     loop {
         let candidate = *next_id;
-        *next_id = next_id.saturating_add(1);
+        *next_id = next_id.wrapping_add(1);
         if used.insert(candidate) {
             return candidate;
         }
@@ -803,12 +854,15 @@ fn sweep_stale_queue_dirs_at(queues_dir: &Path, now: SystemTime) {
             Err(error) if error.kind() == ErrorKind::NotFound => true,
             Err(_) => false,
         };
-        let is_stale = std::fs::metadata(&dir)
+        let age = std::fs::metadata(&dir)
             .and_then(|metadata| metadata.modified())
             .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age >= STALE_QUEUE_DIR_AGE);
-        if is_empty || is_stale {
+            .and_then(|modified| now.duration_since(modified).ok());
+        // A new session reserves its directory before writing a queue or
+        // lease. Give that startup window time to finish before collecting it.
+        if age.is_some_and(|age| {
+            age >= STALE_QUEUE_DIR_AGE || (is_empty && age >= EMPTY_QUEUE_DIR_GRACE)
+        }) {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -1709,6 +1763,109 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_ids_still_allocate_unique_items() {
+        let mut queue = Queue::new();
+        queue.push("first", false);
+        queue.next_id = u64::MAX;
+        queue.push("last id", false);
+        queue.push("wrapped id", false);
+        assert_eq!(queue.item_ids().len(), queue.len());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn queue_snapshots_are_only_readable_by_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("queue.json");
+        let mut queue = Queue::new();
+        queue.push("example --token secret", false);
+        queue.save(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn merge_id_allocator_wraps_past_occupied_maximum() {
+        let mut used = HashSet::from([u64::MAX, 0]);
+        let mut next = u64::MAX;
+        assert_eq!(next_available_id(&mut used, &mut next), 1);
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn duplicate_persisted_ids_are_preserved_as_corrupt_input() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("queue.json");
+        let bytes = br#"{"items":[{"id":0,"command":"first","conditional":false},{"id":0,"command":"second","conditional":false}],"next_id":1}"#;
+        std::fs::write(&path, bytes).unwrap();
+        let (queue, warning) = Queue::load_or_default_with_warning(&path);
+        assert!(queue.is_empty());
+        assert!(warning.unwrap().contains("ignored corrupt"));
+        assert!(std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+            std::fs::read(entry.unwrap().path()).ok().as_deref() == Some(bytes.as_slice())
+        }));
+    }
+
+    #[test]
+    fn failed_claim_rollback_retains_command_in_memory_paused() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("queue.json");
+        let mut queue = Queue::new();
+        queue.push("keep me", false);
+        queue.push("next", false);
+        queue.save(&path).unwrap();
+        let mut known = queue.item_snapshot();
+        let mut paused = false;
+        let QueueClaim::Claimed(item) = queue
+            .claim_next_eligible_if_current(&path, 0, Some(0), None, &mut known, &mut paused)
+            .unwrap()
+        else {
+            panic!("expected claim")
+        };
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            queue
+                .restore_claimed_front(&path, item, &mut known, &mut paused)
+                .is_err()
+        );
+        assert!(queue.paused);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.front().unwrap().command, "keep me");
+        assert_eq!(
+            known.len(),
+            1,
+            "a failed write must not advance the disk snapshot"
+        );
+    }
+
+    #[test]
+    fn rollback_preserves_an_external_item_with_the_same_id() {
+        let mut queue = Queue::new();
+        let id = queue.push("external", false);
+        queue.restore_item_front(QueueItem {
+            id,
+            command: "claimed".into(),
+            conditional: false,
+            origin_cwd: None,
+        });
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.item_ids().len(), 2);
+        assert_eq!(queue.front().unwrap().command, "claimed");
+    }
+
+    #[test]
+    fn sweep_preserves_a_session_before_its_lease_is_written() {
+        let temp = tempdir().unwrap();
+        let path = new_session_path_in(temp.path()).unwrap();
+        let _other = new_session_path_in(temp.path()).unwrap();
+        assert!(path.parent().unwrap().exists());
+    }
+
+    #[test]
     fn load_queue_path_read_error_returns_warning() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("q.json");
@@ -1736,7 +1893,10 @@ mod tests {
         nonempty.save(&recent_dir.join("queue.json")).unwrap();
         nonempty.save(&old_dir.join("queue.json")).unwrap();
 
-        sweep_stale_queue_dirs_at(&queues, SystemTime::now());
+        sweep_stale_queue_dirs_at(
+            &queues,
+            SystemTime::now() + EMPTY_QUEUE_DIR_GRACE + Duration::from_secs(1),
+        );
         assert!(!empty_dir.exists());
         assert!(recent_dir.exists());
         assert!(old_dir.exists());

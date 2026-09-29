@@ -46,6 +46,7 @@ enum State {
     /// `?` seen as the first intermediate byte after `\x1b[`. We're now
     /// collecting digits up to the final byte (`h` or `l`).
     InCsiPrivate,
+    InCsiDiscard,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +115,7 @@ impl Detector {
     /// Number of trailing bytes in the most recently fed chunk that are part
     /// of an incomplete escape sequence.
     pub fn pending_len(&self, chunk_len: usize) -> usize {
-        if matches!(self.state, State::Normal) {
+        if matches!(self.state, State::Normal | State::InCsiDiscard) {
             0
         } else if let Some(start) = self.sequence_start {
             chunk_len.saturating_sub(start)
@@ -164,8 +165,12 @@ impl Detector {
             },
             State::InCsiPrivate => match b {
                 b'0'..=b'9' | b';' => {
-                    self.params.push(b);
-                    State::InCsiPrivate
+                    if self.params.push(b) {
+                        State::InCsiPrivate
+                    } else {
+                        self.sequence_start = None;
+                        State::InCsiDiscard
+                    }
                 }
                 b'h' => {
                     if self.is_alt_screen_mode() {
@@ -247,6 +252,14 @@ impl Detector {
                     State::Normal
                 }
             },
+            State::InCsiDiscard => match b {
+                ESC => {
+                    self.sequence_start = Some(idx);
+                    State::AfterEsc
+                }
+                0x40..=0x7e => State::Normal,
+                _ => State::InCsiDiscard,
+            },
         };
     }
 
@@ -284,9 +297,8 @@ impl Detector {
 
 mod heapless_digits {
     /// Tiny fixed-size byte buffer for accumulating CSI parameter digits.
-    /// 32 bytes is plenty for the worst legitimate `?<num>;<num>;…` we care
-    /// about; longer inputs are silently truncated, which is fine because
-    /// the detector only checks for short specific tokens.
+    /// Overflow discards the entire sequence, so truncated numeric tokens
+    /// cannot be mistaken for valid modes and output buffering stays bounded.
     const CAP: usize = 32;
 
     #[derive(Debug, Clone)]
@@ -305,10 +317,13 @@ mod heapless_digits {
         pub fn clear(&mut self) {
             self.len = 0;
         }
-        pub fn push(&mut self, b: u8) {
+        pub fn push(&mut self, b: u8) -> bool {
             if self.len < CAP {
                 self.data[self.len] = b;
                 self.len += 1;
+                true
+            } else {
+                false
             }
         }
         pub fn as_slice(&self) -> &[u8] {
@@ -320,6 +335,19 @@ mod heapless_digits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_modes_are_streamed_without_truncated_mode_events() {
+        let mut detector = Detector::new();
+        // At the old 32-byte limit this truncated the final number to 1049.
+        let mut bytes = b"\x1b[?".to_vec();
+        bytes.extend(std::iter::repeat_n(b';', 28));
+        bytes.extend_from_slice(b"10490");
+        assert!(detector.feed(&bytes).is_empty());
+        assert_eq!(detector.pending_len(bytes.len()), 0);
+        assert!(detector.feed(b"h").is_empty());
+        assert_eq!(detector.feed(b"\x1b[?1049h"), vec![Event::AltScreenEnter]);
+    }
 
     fn ev(bytes: &[u8]) -> Vec<Event> {
         let mut d = Detector::new();

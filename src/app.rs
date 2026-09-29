@@ -146,6 +146,7 @@ struct TerminalRestoreState {
 
 struct AppState {
     config: Config,
+    shell_kind: crate::shell_integration::ShellKind,
     queue_supported: bool,
     /// Readline can write back a stale PTY size while preparing Bash's prompt.
     wait_for_bash_prompt: bool,
@@ -743,6 +744,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
     let has_startup_status = startup_status.is_some();
     let mut state = AppState {
         config,
+        shell_kind: crate::shell_integration::ShellKind::detect_from_path(&shell),
         queue_supported,
         wait_for_bash_prompt: crate::shell_integration::ShellKind::detect_from_path(&shell)
             == crate::shell_integration::ShellKind::Bash,
@@ -2508,7 +2510,8 @@ fn dispatch_next_eligible(
             );
             match claim {
                 Ok(queue::QueueClaim::Claimed(item)) => {
-                    if let Err(e) = write_command_to_child(writer, &item.command) {
+                    if let Err(e) = write_command_to_child(writer, &item.command, state.shell_kind)
+                    {
                         let rollback = state.queue.restore_claimed_front(
                             &queue_path,
                             item,
@@ -2551,6 +2554,8 @@ fn dispatch_next_eligible(
                     return false;
                 }
                 Err(e) => {
+                    state.queue.paused = true;
+                    state.queue_dirty = true;
                     state.set_status(format!("queue dispatch sync failed: {e}"));
                     return false;
                 }
@@ -2571,7 +2576,7 @@ fn dispatch_next_eligible(
             return false;
         }
 
-        if let Err(e) = write_command_to_child(writer, &item.command) {
+        if let Err(e) = write_command_to_child(writer, &item.command, state.shell_kind) {
             state.queue.paused = true;
             state.queue_dirty = true;
             state.set_status(format!(
@@ -2613,8 +2618,13 @@ fn save_queue_immediately_after_dispatch(state: &mut AppState) {
     }
 }
 
-fn write_command_to_child(writer: &mut Box<dyn Write + Send>, command: &str) -> io::Result<()> {
-    writer.write_all(command.as_bytes())?;
+fn write_command_to_child(
+    writer: &mut Box<dyn Write + Send>,
+    command: &str,
+    shell: crate::shell_integration::ShellKind,
+) -> io::Result<()> {
+    let encoded = crate::shell_integration::encode_queued_command(command, shell)?;
+    writer.write_all(encoded.as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()
 }
@@ -3125,11 +3135,9 @@ fn toggle_queue_pause(state: &mut AppState, writer: &mut Box<dyn Write + Send>) 
         && matches!(state.shell_state, ShellState::AtPrompt)
         && !state.queue.is_empty()
     {
-        let before = state.queue.len();
+        state.set_status("queue resumed");
         if dispatch_next_eligible(state, None, writer) {
             mark_command_started(state);
-        } else if state.queue.len() == before {
-            state.set_status("queue resumed");
         }
     } else {
         state.set_status("queue resumed");
@@ -4079,6 +4087,7 @@ pub(crate) mod tests {
     fn make_state() -> AppState {
         AppState {
             config: Config::default(),
+            shell_kind: crate::shell_integration::ShellKind::Bash,
             queue_supported: true,
             wait_for_bash_prompt: false,
             pending_bash_exit: None,
@@ -4622,6 +4631,52 @@ pub(crate) mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.items()[0].command, "echo keep-me");
         assert!(state.status.contains("dispatch failed"));
+    }
+
+    #[test]
+    fn resume_keeps_dispatch_failure_visible_and_paused() {
+        let mut state = make_state();
+        state.shell_state = ShellState::AtPrompt;
+        state.queue.push("echo keep", false);
+        state.queue.paused = true;
+        let mut writer: Box<dyn Write + Send> = Box::new(FailingWriter);
+        toggle_queue_pause(&mut state, &mut writer);
+        assert!(state.queue.paused);
+        assert_eq!(state.queue.len(), 1);
+        assert!(state.status.contains("dispatch failed"));
+    }
+
+    #[test]
+    fn claim_io_failure_pauses_without_writing_to_the_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = make_state();
+        let path = temp.path().join("queue.json");
+        std::fs::create_dir(&path).unwrap();
+        state.queue_path = Some(path);
+        state.queue.push("echo keep", false);
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut writer: Box<dyn Write + Send> = Box::new(VecWriter(bytes.clone()));
+        assert!(!dispatch_next_eligible(&mut state, Some(0), &mut writer));
+        assert!(state.queue.paused);
+        assert!(state.queue_dirty);
+        assert_eq!(state.queue.len(), 1);
+        assert!(bytes.lock().unwrap().is_empty());
+        assert!(state.status.contains("queue dispatch sync failed"));
+    }
+
+    #[test]
+    fn invalid_command_is_kept_paused_without_partial_input() {
+        let mut state = make_state();
+        state.shell_state = ShellState::AtPrompt;
+        state.queue.push("printf before\0after", false);
+        state.queue.paused = true;
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut writer: Box<dyn Write + Send> = Box::new(VecWriter(bytes.clone()));
+        toggle_queue_pause(&mut state, &mut writer);
+        assert!(state.queue.paused);
+        assert_eq!(state.queue.len(), 1);
+        assert!(bytes.lock().unwrap().is_empty());
+        assert!(state.status.contains("NUL bytes"));
     }
 
     #[test]

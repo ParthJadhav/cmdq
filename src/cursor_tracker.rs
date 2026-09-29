@@ -126,7 +126,7 @@ impl CursorTracker {
                 b'\n' => self.linefeed(),
                 0x08 => self.col = self.col.saturating_sub(1),
                 b'\t' => {
-                    let next = ((self.col / 8) + 1) * 8;
+                    let next = ((self.col / 8) + 1).saturating_mul(8);
                     self.col = next.min(self.cols.saturating_sub(1));
                 }
                 0x20..=0x7e => self.printable_width(1),
@@ -329,6 +329,14 @@ fn is_utf8_continuation(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_near_maximum_terminal_width_does_not_overflow() {
+        let mut tracker = CursorTracker::new(u16::MAX, 24);
+        tracker.set_position(u16::MAX - 1, 0);
+        tracker.feed(b"\t");
+        assert_eq!(tracker.position(), (u16::MAX - 1, 0));
+    }
 
     #[test]
     fn bulk_feed_matches_byte_at_a_time_stepping() {
