@@ -367,8 +367,8 @@ impl LineEditor {
             }
             KeyCode::Tab => InputAction::CompletionUnavailable,
             KeyCode::Enter => {
-                let cmd = self.buffer.trim().to_string();
-                if cmd.is_empty() {
+                let cmd = self.buffer.clone();
+                if cmd.trim().is_empty() {
                     InputAction::Nothing
                 } else if let Some(idx) = self.editing_index {
                     let cond = self.conditional;
@@ -440,6 +440,29 @@ impl LineEditor {
 mod tests {
     use super::*;
     use crossterm::event::KeyEventKind;
+
+    #[test]
+    fn submit_preserves_significant_trailing_whitespace() {
+        let mut editor = LineEditor::new();
+        let command = "printf %s value\\ ";
+        editor.insert_str(command);
+        assert_eq!(
+            editor.handle_key(KeyCode::Enter.into(), &Queue::new()),
+            InputAction::EnqueueCurrent {
+                command: command.into(),
+                conditional: false
+            }
+        );
+        editor.load_for_edit(0, command, false);
+        assert_eq!(
+            editor.handle_key(KeyCode::Enter.into(), &Queue::new()),
+            InputAction::CommitEdit {
+                index: 0,
+                command: command.into(),
+                conditional: false
+            }
+        );
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {

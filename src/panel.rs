@@ -112,8 +112,8 @@ pub fn panel_height(view: &PanelState<'_>, total_rows: u16) -> u16 {
         // some context (e.g. their prompt) while reading the help.
         return total_rows.saturating_sub(2).min(HELP_MAX_ROWS);
     }
-    let n = (view.queue.len() as u16).min(view.max_queue_visible);
-    1 + n + 1 + 1 + u16::from(panel_notice(view).is_some())
+    let n = view.queue.len().min(view.max_queue_visible as usize);
+    (3 + n + usize::from(panel_notice(view).is_some())).min(u16::MAX as usize) as u16
 }
 
 /// Number of physical rows occupied by the currently painted panel after a
@@ -958,6 +958,26 @@ fn input_window(buffer: &str, cursor: usize, max_width: usize) -> (String, usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_queues_do_not_wrap_or_overflow_panel_height() {
+        let items: Vec<_> = (0..=u16::MAX)
+            .map(|id| crate::queue::QueueItem {
+                id: id.into(),
+                command: "true".into(),
+                conditional: false,
+                origin_cwd: None,
+            })
+            .collect();
+        let queue: Queue = serde_json::from_value(serde_json::json!({
+            "items": items, "next_id": 65536
+        }))
+        .unwrap();
+        let mut view = view_with(&queue, true);
+        assert_eq!(panel_height(&view, 30), 11);
+        view.max_queue_visible = u16::MAX;
+        assert_eq!(panel_height(&view, u16::MAX), u16::MAX);
+    }
 
     #[test]
     fn long_input_view_tracks_cursor_tail() {

@@ -302,7 +302,56 @@ fn monotonic_suffix() -> u128 {
 
 pub(crate) fn shell_single_quote(path: &Path) -> String {
     let s = path.to_string_lossy();
-    format!("'{}'", s.replace('\'', "'\\''"))
+    // Escape backslashes outside quotes too: fish interprets \\\\ inside
+    // single quotes, unlike POSIX shells.
+    let mut quoted = String::from("'");
+    for c in s.chars() {
+        match c {
+            '\\' => quoted.push_str("'\\\\'"),
+            '\'' => quoted.push_str("'\\''"),
+            _ => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Send a block through the shell's parser as one command. Literal control
+/// bytes would otherwise become readline/ZLE edits, and separate lines would
+/// emit independent command-end markers with incorrect chaining statuses.
+pub(crate) fn encode_queued_command(command: &str, shell: ShellKind) -> std::io::Result<String> {
+    if command.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "shell commands cannot contain NUL bytes",
+        ));
+    }
+    if !command.chars().any(|c| c.is_ascii_control()) {
+        return Ok(command.to_string());
+    }
+    use std::fmt::Write;
+    let fish = shell == ShellKind::Fish;
+    let mut encoded = String::from(if fish {
+        "builtin eval '"
+    } else {
+        "builtin eval $'"
+    });
+    for c in command.chars() {
+        match c {
+            '\\' => encoded.push_str("\\\\"),
+            '\'' => encoded.push_str("\\'"),
+            c if c.is_ascii_control() => {
+                if fish {
+                    write!(encoded, "'\\x{:02x}'", c as u32).unwrap();
+                } else {
+                    write!(encoded, "\\x{:02x}", c as u32).unwrap();
+                }
+            }
+            _ => encoded.push(c),
+        }
+    }
+    encoded.push('\'');
+    Ok(encoded)
 }
 
 #[cfg(test)]

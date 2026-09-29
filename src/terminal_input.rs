@@ -204,6 +204,17 @@ impl Reader {
 fn find_cursor_report(bytes: &[u8]) -> Option<(std::ops::Range<usize>, (u16, u16))> {
     let mut start = 0;
     while start + 1 < bytes.len() {
+        // Paste text and string replies may contain bytes that look like a
+        // CPR. Only reports outside those tokens answer our cursor query.
+        if bytes[start..].starts_with(b"\x1b[200~")
+            || matches!(
+                &bytes[start..start + 2],
+                b"\x1b]" | b"\x1bP" | b"\x1b_" | b"\x1b^"
+            )
+        {
+            start += token_length(&bytes[start..])?;
+            continue;
+        }
         if bytes[start] != 0x1b || bytes[start + 1] != b'[' {
             start += 1;
             continue;
@@ -376,6 +387,16 @@ mod tests {
         assert!(
             matches!(reader.take(), Some(Input::Event(Event::Key(key))) if key.code == KeyCode::Char('l'))
         );
+    }
+
+    #[test]
+    fn cursor_query_does_not_consume_pasted_cursor_reports() {
+        let mut reader = Reader::new((80, 24));
+        let paste = b"\x1b[200~printf '\x1b[12;40R'\x1b[201~";
+        reader.buffer.extend_from_slice(paste);
+        reader.buffer.extend_from_slice(b"\x1b[2;3R");
+        assert_eq!(reader.take_cursor_report(), Some((2, 1)));
+        assert_eq!(reader.buffer, paste);
     }
 
     #[test]

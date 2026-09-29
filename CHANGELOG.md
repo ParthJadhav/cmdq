@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+
+- Multiline queue items execute as one shell evaluation, so conditional commands
+  use the whole item's final exit status. Literal tabs and other control bytes
+  are preserved, and commands containing NUL stay paused without partial input.
+- Submitting or editing a command preserves significant leading and trailing
+  whitespace. Shell integration paths preserve quotes and backslashes in Bash,
+  Zsh, and Fish.
+- Dispatch and persistence failures pause the queue and keep the error visible.
+  Failed claim rollback retains the command in memory, including when another
+  command has reused its ID.
+- Queue IDs remain unique when counters wrap; snapshots with duplicate IDs are
+  backed up as corrupt input. New snapshot files are readable only by their
+  owner, and startup cleanup gives new sessions time to create their leases.
+- Oversized terminal sequences cannot produce truncated mode or lifecycle
+  events. Startup cursor queries preserve cursor-report-shaped pasted text.
+- Large queues and maximum-width terminals no longer overflow panel or cursor
+  calculations.
+- Pin the Homebrew setup action to a valid release for installation checks.
+
+### Changed
+
+- Multiline and control-containing queued commands use the shell's builtin
+  `eval`, preserving shell state. Command history may show their encoded form.
+
 ## 0.4.0
 
 ### Added
