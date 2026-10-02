@@ -89,6 +89,10 @@
   </div>
 </header>
 
+<div class="callout warn" role="note">
+  <strong>Historical review against v0.3.3.</strong> Problem statements, source line numbers, captures, and the roadmap below describe 13 September 2026. Some proposals have since shipped. Check <a href="ux-status.md">UX implementation status</a> and the <a href="development.md">developer guide</a> before planning work. Item 33's full configuration example is proposed syntax; use the <a href="../README.md#configuration">supported configuration</a> for current releases.
+</div>
+
 <nav class="toc">
   <strong>Contents</strong>
   <ol>
@@ -458,6 +462,7 @@
 <article class="item" id="i14">
   <header><span class="id">14</span><h3>Do not leak Ctrl-X into readline when there is nothing to resume</h3>
   <div class="tags"><span class="tag kind">fix</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●○○○</span></div></header>
+  <div class="callout insight" role="note"><strong>Shipped in v0.4.0.</strong> Empty-prompt Ctrl-X is absorbed by default; forwarding is configurable. See <a href="ux-status.md">implementation status</a>.</div>
   <h4>Problem</h4>
   <p>Capture 27: a <kbd>Ctrl-X</kbd> pressed at an idle prompt after the queue had drained was forwarded to Bash as 0x18. Bash treats it as a chord prefix, so the next character (<code>s</code> of <code>sleep</code>) was consumed silently and the command ran as <code>leep 2</code>. The same happens after any quick queue: users press Ctrl-X reflexively to "start" or "resume" and get a corrupted next command.</p>
   <h4>Proposal</h4>
@@ -729,6 +734,7 @@
 <article class="item" id="i29">
   <header><span class="id">29</span><h3>Remove per-session queue directories on exit; sweep stale ones</h3>
   <div class="tags"><span class="tag kind">fix</span><span class="tag e-s">effort S</span><span class="tag imp">impact ●●●○○</span></div></header>
+  <div class="callout insight" role="note"><strong>Shipped in v0.4.0, with startup protection improved in v0.4.1.</strong> Queue-directory cleanup and guarded startup sweeping are implemented. Cross-session recovery is still a separate proposal. See <a href="ux-status.md">implementation status</a>.</div>
   <h4>Problem</h4>
   <p>Every launch creates <code>queues/&lt;pid&gt;-&lt;nanos&gt;-0/queue.json</code> plus a <code>.lock</code>. Nothing deletes them: <code>install_signal_cleanup</code> (app.rs:1592) removes the lease file and the synthetic rc directories, and <code>ShellPty::drop</code> removes the rc directories, but the queue directory is not on either list. The data directory inspected for this review held 21 orphaned directories after about a day of use. The <code>sessions/</code> directory has a 24-hour sweep (<code>cleanup_stale_session_dirs</code>, pty.rs); <code>queues/</code> has none.</p>
   <h4>Proposal</h4>
@@ -812,10 +818,12 @@ cmdq wait [--timeout 10m]            <span class="c"># exit when the queue drain
 <article class="item" id="i33">
   <header><span class="id">33</span><h3>A configuration file and environment overrides</h3>
   <div class="tags"><span class="tag kind">foundation</span><span class="tag e-m">effort M</span><span class="tag imp">impact ●●●●○</span></div></header>
+  <div class="callout insight" role="note"><strong>Partially shipped in v0.4.0.</strong> Configuration inspection, panel delay/row limits, and Ctrl-X forwarding are implemented. Other settings below remain proposals. See <a href="ux-status.md">implementation status</a> and the <a href="../README.md#configuration">accepted schema</a>.</div>
   <h4>Problem</h4>
   <p>Twelve tuning constants live at the top of app.rs (panel delay 1.5 s, eight visible rows, 4 s status fade, confirmation windows) and every key is a literal in <code>handle_key</code>. Users on slow CI-like commands want a longer delay; users who queue constantly want zero delay; people with terminals that eat Ctrl-Q or Alt need to rebind; light-theme users need colours. None of it is adjustable.</p>
   <h4>Proposal</h4>
   <p><code>~/.config/cmdq/config.toml</code> (respecting <code>$XDG_CONFIG_HOME</code>), every key optional, with <code>CMDQ_*</code> environment overrides for the scalar ones and a <code>cmdq config --print</code> that shows the effective values and their sources:</p>
+<div class="callout warn" role="note"><strong>Proposed schema, not accepted configuration.</strong> Unsupported fields such as <code>compact</code> cause current releases to reject the file and use defaults, including for otherwise valid settings.</div>
 <pre><code><span class="c"># ~/.config/cmdq/config.toml</span>
 [panel]
 delay_ms = 1500          <span class="c"># CMDQ_PANEL_DELAY_MS</span>

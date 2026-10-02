@@ -154,6 +154,7 @@ cargo fmt --all -- --check
 cargo install --path . --force --locked
 ```
 
-See [release testing](docs/releasing.md) for the platform matrix and release process.
+See [the developer guide](docs/development.md) for the code map and test selection,
+and [release testing](docs/releasing.md) for the platform matrix and release process.
 
 MIT licensed. Created by [Parth Jadhav](https://www.parthjadhav.com/).
