@@ -326,6 +326,10 @@
   <p class="lede">A small terminal wrapper that lets you type the <em>next</em> command while one is still running. This document walks through the problem, the options ruled out, the architecture, and the lessons — both Rust-specific and general — that came out of building it.</p>
 </header>
 
+<div class="callout warn" role="note">
+  <strong>Historical architecture walkthrough.</strong> This narrative preserves an earlier implementation, including the shared queue path, rendering options, shortcuts, line counts, and test counts. Current cmdq streams shell output to the real terminal and gives each supported-shell session a separate queue file. Use the <a href="development.md">developer guide</a>, <a href="../README.md">README</a>, and <a href="../CHANGELOG.md">changelog</a> for current behavior.
+</div>
+
 <nav class="toc">
   <strong>Contents</strong>
   <ol>
