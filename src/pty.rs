@@ -33,7 +33,7 @@ pub struct PtyIo {
 
 impl ShellPty {
     /// Spawn `shell_path` with cmdq's integration. Returns the pty + io handles.
-    pub fn spawn(shell_path: &str, cols: u16, rows: u16) -> Result<(Self, PtyIo)> {
+    pub fn spawn(shell_path: &str, kind: ShellKind, cols: u16, rows: u16) -> Result<(Self, PtyIo)> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -43,8 +43,6 @@ impl ShellPty {
                 pixel_height: 0,
             })
             .context("openpty failed")?;
-
-        let kind = ShellKind::detect_from_path(shell_path);
 
         // A supported shell must have working hooks; silently falling back
         // leaves a queue that accepts commands but never dispatches them.
@@ -262,20 +260,7 @@ fn prepare_session_dir(prefix: &str) -> Result<PathBuf> {
         .join("sessions");
     std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
     cleanup_stale_session_dirs(&base);
-    for attempt in 0..100 {
-        let dir = base.join(format!(
-            "{prefix}-{}-{}-{}",
-            std::process::id(),
-            atomic_file::unique_suffix(),
-            attempt
-        ));
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
-        }
-    }
-    anyhow::bail!("could not create a session directory in {}", base.display())
+    atomic_file::create_unique_dir(&base, &format!("{prefix}-"))
 }
 
 fn cleanup_stale_session_dirs(base: &Path) {

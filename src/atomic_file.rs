@@ -4,7 +4,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
@@ -55,6 +55,24 @@ pub(crate) fn write(path: &Path, contents: &[u8], access: Access) -> Result<()> 
         let _ = std::fs::remove_file(&tmp);
         Err(error).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))
     })
+}
+
+/// Create a new directory `<base>/<prefix><pid>-<unique suffix>-<attempt>`
+/// that no other process or earlier call owns.
+pub(crate) fn create_unique_dir(base: &Path, prefix: &str) -> Result<PathBuf> {
+    for attempt in 0..100 {
+        let dir = base.join(format!(
+            "{prefix}{}-{}-{attempt}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
+        }
+    }
+    anyhow::bail!("could not create a unique directory in {}", base.display())
 }
 
 /// A number no earlier call in this process returned, and that later

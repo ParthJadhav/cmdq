@@ -107,10 +107,7 @@ pub(super) fn dispatch_cwd_warning_for_item(
     item: &queue::QueueItem,
     current: &Path,
 ) -> Option<String> {
-    let origin = item.origin_cwd.as_deref().or(queue.origin_cwd())?;
-    if origin == current {
-        return None;
-    }
+    let origin = queue.foreign_origin(item, current)?;
     cwd_warning(&[origin.to_path_buf()], current, "Ctrl-X to run here")
 }
 

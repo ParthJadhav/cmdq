@@ -679,10 +679,8 @@ fn command_start_clears_stale_prompt_bracketed_paste_mode() {
 fn command_end_clears_child_bracketed_paste_mode() {
     let mut s = make_state();
     s.child.bracketed_paste = true;
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf));
 
-    handle_command_end(&mut s, Some(0), &mut w);
+    lifecycle::command_ended(&mut s, Some(0));
 
     assert!(
         !s.child.bracketed_paste,

@@ -83,10 +83,6 @@ impl SessionLease {
         write_record_atomic(&self.path, &self.record)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn remover(&self) -> LeaseRemover {
         LeaseRemover {
             path: self.path.clone(),

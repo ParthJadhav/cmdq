@@ -320,8 +320,7 @@ impl Queue {
                 match disk.items.first().cloned() {
                     Some(item) if item.id == expected_id => {
                         if let Some(current) = current_cwd
-                            && let Some(origin) = item.origin_cwd.as_deref().or(disk.origin_cwd())
-                            && origin != current
+                            && disk.foreign_origin(&item, current).is_some()
                         {
                             disk.paused = true;
                             disk.save_snapshot_unlocked(path)?;
@@ -366,6 +365,14 @@ impl Queue {
             self.restore_item_front(item);
         }
         result
+    }
+
+    /// Where `item` was queued, when that is not `current`.
+    pub fn foreign_origin<'a>(&'a self, item: &'a QueueItem, current: &Path) -> Option<&'a Path> {
+        item.origin_cwd
+            .as_deref()
+            .or(self.origin_cwd())
+            .filter(|origin| *origin != current)
     }
 
     /// Take `disk` as this session's queue and as the last state seen on disk.
@@ -736,19 +743,7 @@ fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(&queues_dir)
         .with_context(|| format!("creating queue directory {}", queues_dir.display()))?;
     sweep_stale_queue_dirs_at(&queues_dir, SystemTime::now());
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for attempt in 0u64.. {
-        let dir = queues_dir.join(format!("{}-{timestamp}-{attempt}", std::process::id()));
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir.join(QUEUE_FILE_NAME)),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
-        }
-    }
-    unreachable!("session directory counter exhausted")
+    Ok(atomic_file::create_unique_dir(&queues_dir, "")?.join(QUEUE_FILE_NAME))
 }
 
 /// Remove the directory owned by a per-session queue. This is intentionally

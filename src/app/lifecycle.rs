@@ -12,7 +12,7 @@ use super::queue_sync::{
 };
 use super::screen::Screen;
 use super::status::truncate_for_status;
-use super::{AppState, ShellState};
+use super::{AppState, ChildModes, ShellState};
 use crate::osc133;
 use crate::queue;
 use crate::shell_integration::{ShellKind, encode_queued_command};
@@ -21,6 +21,10 @@ use crate::shell_integration::{ShellKind, encode_queued_command};
 /// window of a forwarded `0x03` (or with exit code 130) pauses the queue.
 const SIGINT_AUTO_PAUSE_WINDOW: Duration = Duration::from_secs(3);
 const SIGINT_EXIT_CODE: i32 = 130;
+
+/// How long after a command starts its terminal mode is trusted: shells keep
+/// their line editor's raw mode for a moment while handing over the tty.
+const TTY_CHECK_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
 /// Bytes for the shell. Queued commands go through
 /// [`ShellInput::send_command`], which first gives the panel's rows back: the
@@ -101,13 +105,8 @@ pub(super) fn handle_osc_event(
             mark_command_started(state);
         }
         osc133::Event::CommandEnd { exit_code } => {
-            state.shell_state = ShellState::AtPrompt;
-            state.command_started_at = None;
-            state.last_exit_code = exit_code;
-            state.prompt.new_prompt();
-            state.running_output_tail.clear();
-            state.child_input_active = false;
-            restore_child_terminal_modes_after_command(state, screen)?;
+            let child = command_ended(state, exit_code);
+            screen.end_child_modes(child.alt_screen, child.mouse_capture, child.focus_events)?;
             if state.wait_for_bash_prompt && !bash_prompt_ready {
                 state.pending_bash_exit = Some(exit_code);
                 return Ok(());
@@ -133,16 +132,6 @@ pub(super) fn handle_osc_event(
             state.shell_cwd = Some(path);
         }
     }
-    Ok(())
-}
-
-fn restore_child_terminal_modes_after_command(
-    state: &mut AppState,
-    screen: &mut Screen,
-) -> Result<()> {
-    let child = state.child;
-    screen.end_child_modes(child.alt_screen, child.mouse_capture, child.focus_events)?;
-    state.reset_child_modes();
     Ok(())
 }
 
@@ -190,8 +179,25 @@ pub(super) fn refresh_auto_passthrough_for_child_modes(
 
 pub(super) fn mark_command_started(state: &mut AppState) {
     state.shell_state = ShellState::Running;
-    state.command_started_at = Some(Instant::now());
-    state.command_tty_check_after = Some(Instant::now() + Duration::from_millis(100));
+    let now = Instant::now();
+    state.command_started_at = Some(now);
+    state.command_tty_check_after = Some(now + TTY_CHECK_SETTLE_DELAY);
+    reset_command_tracking(state);
+}
+
+/// Back at the prompt. Returns the modes the finished program left on, for
+/// the terminal to turn off.
+pub(super) fn command_ended(state: &mut AppState, exit_code: Option<i32>) -> ChildModes {
+    let child = state.child;
+    state.shell_state = ShellState::AtPrompt;
+    state.command_started_at = None;
+    state.last_exit_code = exit_code;
+    reset_command_tracking(state);
+    child
+}
+
+/// Forget what was learned about the previous command line and program.
+fn reset_command_tracking(state: &mut AppState) {
     state.prompt.new_prompt();
     state.running_output_tail.clear();
     state.child_input_active = false;
@@ -206,7 +212,6 @@ pub(super) fn handle_command_end(
     shell: &mut ShellInput<'_>,
 ) -> bool {
     state.manual_passthrough = false;
-    state.reset_child_modes();
     let recent_sigint = state
         .last_sigint_at
         .is_some_and(|t| t.elapsed() <= SIGINT_AUTO_PAUSE_WINDOW);

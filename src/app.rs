@@ -411,7 +411,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
         let (c, r) = crossterm::terminal::size().unwrap_or((80, 24));
         (c.max(1), r.max(1))
     };
-    let (pty, io_pair) = ShellPty::spawn(&shell, cols, rows)?;
+    let (pty, io_pair) = ShellPty::spawn(&shell, shell_kind, cols, rows)?;
     let pty_output = pty_output::spawn_reader(io_pair.reader);
     let mut shell_writer: Box<dyn Write + Send> = io_pair.writer;
 
