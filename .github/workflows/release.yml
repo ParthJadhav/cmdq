@@ -258,6 +258,7 @@ jobs:
         run: |
           cd target/distrib
           shasum -a 256 -c "cmdq-$TARGET.tar.xz.sha256"
+          rm -rf unpacked
           mkdir unpacked
           tar -xJf "cmdq-$TARGET.tar.xz" -C unpacked
           binary=$(find "$PWD/unpacked" -type f -name cmdq)
