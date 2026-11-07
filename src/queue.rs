@@ -313,62 +313,43 @@ impl Queue {
         with_queue_file_lock(path, || {
             let mut merge = SaveMerge::default();
             let mut disk = self.read_disk_snapshot_for_merge(path, &mut merge)?;
-            if merge.warning.is_some() || disk.paused {
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::Stale);
-            }
-
-            let mut changed = false;
-            while disk
-                .items
-                .first()
-                .map(|item| item.conditional && prev_exit != Some(0))
-                .unwrap_or(false)
-            {
-                disk.items.remove(0);
-                changed = true;
-            }
-
-            let Some(item) = disk.items.first().cloned() else {
-                if changed {
-                    disk.save_snapshot_unlocked(path)?;
+            let claim = if merge.warning.is_some() || disk.paused {
+                QueueClaim::Stale
+            } else {
+                let mut skipped = false;
+                while disk
+                    .items
+                    .first()
+                    .is_some_and(|item| item.conditional && prev_exit != Some(0))
+                {
+                    disk.items.remove(0);
+                    skipped = true;
                 }
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::Stale);
+                match disk.items.first().cloned() {
+                    Some(item) if item.id == expected_id => {
+                        if let Some(current) = current_cwd
+                            && let Some(origin) = item.origin_cwd.as_deref().or(disk.origin_cwd())
+                            && origin != current
+                        {
+                            disk.paused = true;
+                            disk.save_snapshot_unlocked(path)?;
+                            QueueClaim::BlockedByCwd(item)
+                        } else {
+                            let item = disk.items.remove(0);
+                            disk.save_snapshot_unlocked(path)?;
+                            QueueClaim::Claimed(item)
+                        }
+                    }
+                    _ => {
+                        if skipped {
+                            disk.save_snapshot_unlocked(path)?;
+                        }
+                        QueueClaim::Stale
+                    }
+                }
             };
-
-            if item.id != expected_id {
-                if changed {
-                    disk.save_snapshot_unlocked(path)?;
-                }
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::Stale);
-            }
-
-            if let Some(current) = current_cwd
-                && let Some(origin) = item.origin_cwd.as_deref().or(disk.origin_cwd())
-                && origin != current
-            {
-                disk.paused = true;
-                disk.save_snapshot_unlocked(path)?;
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::BlockedByCwd(item));
-            }
-
-            let item = disk.items.remove(0);
-            disk.save_snapshot_unlocked(path)?;
-            *self = disk;
-            *known_items = self.item_snapshot();
-            *known_paused = self.paused;
-            Ok(QueueClaim::Claimed(item))
+            self.adopt(disk, known_items, known_paused);
+            Ok(claim)
         })
     }
 
@@ -384,9 +365,7 @@ impl Queue {
             let mut disk = self.read_disk_snapshot_for_merge(path, &mut merge)?;
             disk.restore_item_front(item.clone());
             disk.save_snapshot_unlocked(path)?;
-            *self = disk;
-            *known_items = self.item_snapshot();
-            *known_paused = self.paused;
+            self.adopt(disk, known_items, known_paused);
             Ok(())
         });
         if result.is_err() {
@@ -395,6 +374,13 @@ impl Queue {
             self.restore_item_front(item);
         }
         result
+    }
+
+    /// Take `disk` as this session's queue and as the last state seen on disk.
+    fn adopt(&mut self, disk: Self, known_items: &mut Vec<QueueItem>, known_paused: &mut bool) {
+        *self = disk;
+        *known_items = self.item_snapshot();
+        *known_paused = self.paused;
     }
 
     fn restore_item_front(&mut self, mut item: QueueItem) {
@@ -746,8 +732,7 @@ fn lock_path_for(path: &Path) -> PathBuf {
 /// identity from cwd, the parent process, or inherited environment variables:
 /// separate shells can share all of those.
 pub fn new_session_path() -> Result<PathBuf> {
-    let legacy_path = try_default_path()?;
-    new_session_path_in(legacy_path.parent().expect("queue path has a parent"))
+    new_session_path_in(&queue_data_dir()?)
 }
 
 fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
@@ -828,36 +813,23 @@ fn sweep_stale_queue_dirs_at(queues_dir: &Path, now: SystemTime) {
 /// Legacy shared persistence path: `$XDG_DATA_HOME/cmdq/queue.json`,
 /// the platform data directory, or `~/.cmdq/queue.json`.
 pub fn try_default_path() -> Result<PathBuf> {
+    Ok(queue_data_dir()?.join("queue.json"))
+}
+
+/// Where cmdq keeps queues: the legacy `queue.json` and per-session `queues/`.
+fn queue_data_dir() -> Result<PathBuf> {
     if let Some(dir) = crate::paths::xdg_data_home() {
-        return Ok(dir.join("cmdq").join("queue.json"));
+        return Ok(dir.join("cmdq"));
     }
     if let Some(dir) = dirs::data_dir().and_then(crate::paths::absolute_path) {
-        return Ok(dir.join("cmdq").join("queue.json"));
+        return Ok(dir.join("cmdq"));
     }
     if let Some(home) = dirs::home_dir().and_then(crate::paths::absolute_path) {
-        return Ok(home.join(".cmdq").join("queue.json"));
+        return Ok(home.join(".cmdq"));
     }
     Err(anyhow!(
         "could not locate an absolute home/data dir; set XDG_DATA_HOME or HOME"
     ))
-}
-
-/// Default persistence path. Prefer `try_default_path` when startup can report
-/// a useful error; this infallible form avoids ever falling back to the cwd.
-pub fn default_path() -> PathBuf {
-    try_default_path().unwrap_or_else(|_| fallback_temp_path())
-}
-
-fn fallback_temp_path() -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    if !dir.is_absolute() {
-        dir = if cfg!(unix) {
-            PathBuf::from("/tmp")
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        };
-    }
-    dir.join("cmdq").join("queue.json")
 }
 
 #[cfg(test)]
