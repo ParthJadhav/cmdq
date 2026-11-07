@@ -68,7 +68,7 @@ impl OutputTail {
 
     const MAX_TAIL_CHARS: usize = 200;
 
-    pub(super) fn push(&mut self, c: char) {
+    fn push(&mut self, c: char) {
         self.text.push(c);
         // Only ASCII ever lands here, so bytes == chars. Trim in bulk once the
         // buffer has doubled instead of rescanning the tail on every byte;
@@ -80,7 +80,7 @@ impl OutputTail {
     }
 
     /// The last `MAX_TAIL_CHARS` characters of output on the current line.
-    pub(super) fn tail(&self) -> &str {
+    fn tail(&self) -> &str {
         let start = self.text.len().saturating_sub(Self::MAX_TAIL_CHARS);
         let start = (start..=self.text.len())
             .find(|&i| self.text.is_char_boundary(i))

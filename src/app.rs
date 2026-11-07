@@ -93,9 +93,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// pipe, so this only bounds the latency of time-driven transitions.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How often a running cmdq refreshes its lightweight "I'm alive" lease.
-const SESSION_LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Terminal modes the running program asked for. They end with the command.
 #[derive(Debug, Clone, Copy, Default)]
 struct ChildModes {
@@ -159,8 +156,7 @@ struct AppState {
     /// Last queue-save error already surfaced to the user. This lets us keep
     /// retrying without repainting a fresh status every event-loop tick.
     queue_save_error: Option<String>,
-    /// `None` keeps the queue in memory only.
-    queue_path: Option<PathBuf>,
+    queue_path: PathBuf,
     queue_known_items: Vec<queue::QueueItem>,
     queue_known_paused: bool,
     queue_external_change_pending: bool,
@@ -269,6 +265,14 @@ impl AppState {
             show_help: self.show_help,
             max_queue_visible: self.config.panel.max_rows,
         }
+    }
+
+    fn apply_desired_layout(&self, screen: &mut Screen) -> Result<()> {
+        let desired = self.desired_layout(screen.rows());
+        if desired != screen.layout() {
+            screen.set_layout(desired)?;
+        }
+        Ok(())
     }
 
     fn desired_layout(&self, term_rows: u16) -> PanelLayout {
@@ -411,7 +415,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
         let (c, r) = crossterm::terminal::size().unwrap_or((80, 24));
         (c.max(1), r.max(1))
     };
-    let (pty, io_pair) = ShellPty::spawn(cfg.shell.as_deref(), cols, rows)?;
+    let (pty, io_pair) = ShellPty::spawn(&shell, cols, rows)?;
     let pty_output = pty_output::spawn_reader(io_pair.reader);
     let mut shell_writer: Box<dyn Write + Send> = io_pair.writer;
 
@@ -475,7 +479,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
         status_set_at: None,
         queue_dirty: false,
         queue_save_error: None,
-        queue_path: Some(queue_path.clone()),
+        queue_path: queue_path.clone(),
         queue_known_items,
         queue_known_paused,
         queue_external_change_pending: false,
@@ -517,11 +521,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
     }
 
     let result = loop {
-        // Readline/ZLE briefly retain their raw mode while submitting a
-        // command. Allow that handoff to settle before treating it as a child
-        // requesting direct input. Recheck even when there is no output.
-        state.child.tty_input = state.tty_input_requested(&screen.pty);
-        refresh_auto_passthrough_for_child_modes(&mut state, &mut screen, None)?;
+        refresh_tty_input(&mut state, &mut screen)?;
 
         // Give input, repainting, and child-exit checks a turn even when the
         // producer continuously fills the channel (e.g. yes or a busy log).
@@ -546,7 +546,10 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
         // Slow programs, network links, and busy runners can pause arbitrarily
         // between fragments of the same terminal control sequence.
         state.tick_status();
-        flush_pending_escape_if_due(&mut state, &mut ShellInput::new(&mut *shell_writer, None));
+        flush_pending_escape_if_due(
+            &mut state,
+            &mut ShellInput::new(&mut *shell_writer, &mut screen),
+        );
 
         if let Some(status) = screen.pty.try_wait().context("wait for shell")? {
             sniffer.flush_pending(&mut state, &mut screen)?;
@@ -556,10 +559,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
             break Ok(status.exit_code());
         }
 
-        let desired = state.desired_layout(screen.rows());
-        if desired != screen.layout() {
-            screen.set_layout(desired)?;
-        }
+        state.apply_desired_layout(&mut screen)?;
 
         // PTY output wakes the poll through a pipe, so idle iterations can
         // sleep longer; keep the short timeout only while a partial key
@@ -600,28 +600,9 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
             // A reader can restore canonical mode while poll waits for the
             // next key. Route against the current discipline, not the state
             // sampled before the last output batch.
-            let direct_input = state.tty_input_requested(&screen.pty);
-            if direct_input != state.child.tty_input {
-                state.child.tty_input = direct_input;
-                refresh_auto_passthrough_for_child_modes(&mut state, &mut screen, None)?;
-            }
+            refresh_tty_input(&mut state, &mut screen)?;
             match event {
-                CtEvent::Resize(new_cols, new_rows) => {
-                    let reflowed_panel_rows = match screen.layout() {
-                        PanelLayout::Reserved { height } => panel::reflowed_panel_height(
-                            &state.panel_view(),
-                            height,
-                            screen.cols(),
-                            new_cols.max(1),
-                        ),
-                        PanelLayout::Hidden => 0,
-                    };
-                    screen.resize(new_cols, new_rows, reflowed_panel_rows)?;
-                    state.terminal_allows_panel =
-                        terminal_allows_panel(screen.cols(), screen.rows());
-                    screen.set_layout(state.desired_layout(screen.rows()))?;
-                    screen.resize_pty();
-                }
+                CtEvent::Resize(cols, rows) => handle_resize(&mut state, &mut screen, cols, rows)?,
                 CtEvent::Key(key) => {
                     if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                         #[cfg(unix)]
@@ -635,7 +616,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
                     let original = Some(terminal_input.event_bytes.as_slice());
                     #[cfg(not(unix))]
                     let original = None;
-                    let mut shell = ShellInput::new(&mut *shell_writer, Some(&mut screen));
+                    let mut shell = ShellInput::new(&mut *shell_writer, &mut screen);
                     if let KeyOutcome::Quit = handle_key(key, &mut state, &mut shell, original) {
                         screen.hide_panel()?;
                         break Ok(0);
@@ -644,7 +625,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
                 CtEvent::Paste(text) => handle_paste(
                     text,
                     &mut state,
-                    &mut ShellInput::new(&mut *shell_writer, None),
+                    &mut ShellInput::new(&mut *shell_writer, &mut screen),
                 ),
                 CtEvent::Mouse(mouse) => {
                     if state.child.mouse_capture || state.auto_passthrough {
@@ -655,15 +636,15 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
                         #[cfg(unix)]
                         let _ = mouse;
                         if !bytes.is_empty() {
-                            ShellInput::new(&mut *shell_writer, None).send(&bytes);
+                            ShellInput::new(&mut *shell_writer, &mut screen).send(&bytes);
                         }
                     }
                 }
                 CtEvent::FocusGained if state.child.focus_events => {
-                    ShellInput::new(&mut *shell_writer, None).send(b"\x1b[I");
+                    ShellInput::new(&mut *shell_writer, &mut screen).send(b"\x1b[I");
                 }
                 CtEvent::FocusLost if state.child.focus_events => {
-                    ShellInput::new(&mut *shell_writer, None).send(b"\x1b[O");
+                    ShellInput::new(&mut *shell_writer, &mut screen).send(b"\x1b[O");
                 }
                 CtEvent::FocusGained | CtEvent::FocusLost => {}
             }
@@ -674,7 +655,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
             queued_count.store(state.queue.len(), Ordering::Release);
             sync_queue_from_disk_if_due(&mut state, &mut last_queue_sync);
         }
-        if last_session_lease_refresh.elapsed() >= SESSION_LEASE_REFRESH_INTERVAL {
+        if last_session_lease_refresh.elapsed() >= crate::session_lease::REFRESH_INTERVAL {
             last_session_lease_refresh = Instant::now();
             if let Some(lease) = &mut session_lease {
                 let _ = lease.refresh();
@@ -700,4 +681,26 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
         queue::remove_session_dir(&queue_path);
     }
     result
+}
+
+/// The terminal changed size: release the panel at the old size, clear what
+/// the terminal reflowed, then lay out again for the new size.
+fn handle_resize(state: &mut AppState, screen: &mut Screen, cols: u16, rows: u16) -> Result<()> {
+    let reflowed_panel_rows = match screen.layout() {
+        PanelLayout::Reserved { height } => {
+            panel::reflowed_panel_height(&state.panel_view(), height, screen.cols(), cols.max(1))
+        }
+        PanelLayout::Hidden => 0,
+    };
+    screen.resize(cols, rows, reflowed_panel_rows)?;
+    state.terminal_allows_panel = terminal_allows_panel(screen.cols(), screen.rows());
+    screen.set_layout(state.desired_layout(screen.rows()))
+}
+
+/// Readline/ZLE briefly keep their raw mode while submitting a command, and
+/// a reader can restore canonical mode at any time, so the running program's
+/// direct-input request is re-sampled before routing anything.
+fn refresh_tty_input(state: &mut AppState, screen: &mut Screen) -> Result<()> {
+    state.child.tty_input = state.tty_input_requested(&screen.pty);
+    refresh_auto_passthrough_for_child_modes(state, screen, None)
 }

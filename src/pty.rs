@@ -33,8 +33,8 @@ pub struct PtyIo {
 }
 
 impl ShellPty {
-    /// Spawn the configured shell. Returns the pty + io handles.
-    pub fn spawn(shell: Option<&str>, cols: u16, rows: u16) -> Result<(Self, PtyIo)> {
+    /// Spawn `shell_path` with cmdq's integration. Returns the pty + io handles.
+    pub fn spawn(shell_path: &str, cols: u16, rows: u16) -> Result<(Self, PtyIo)> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -45,11 +45,7 @@ impl ShellPty {
             })
             .context("openpty failed")?;
 
-        let shell_path = shell
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/sh".to_string());
-        let kind = ShellKind::detect_from_path(&shell_path);
+        let kind = ShellKind::detect_from_path(shell_path);
 
         // A supported shell must have working hooks; silently falling back
         // leaves a queue that accepts commands but never dispatches them.
@@ -59,7 +55,7 @@ impl ShellPty {
         };
         let mut session_dirs = Vec::new();
 
-        let mut cmd = CommandBuilder::new(&shell_path);
+        let mut cmd = CommandBuilder::new(shell_path);
 
         // Mark this session.
         cmd.env("CMDQ_ACTIVE", "1");
@@ -191,11 +187,11 @@ impl Drop for ShellPty {
 /// Build a temporary bash rcfile that sources the user's real ~/.bashrc and
 /// then cmdq's integration script. Interactive bash ignores BASH_ENV, so
 /// --rcfile is the only reliable way to make clean bash sessions emit markers.
-fn prepare_bash_rcfile(script: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
+fn prepare_bash_rcfile(script: &Path) -> Result<(PathBuf, PathBuf)> {
     let session_dir = prepare_session_dir("bash")?;
     let rcfile = session_dir.join("bashrc");
 
-    let real_home = dirs::home_dir()?;
+    let real_home = dirs::home_dir().context("no home directory")?;
     let real_bashrc_q = shell_single_quote(&real_home.join(".bashrc"));
     let real_bash_profile_q = shell_single_quote(&real_home.join(".bash_profile"));
     let real_bash_login_q = shell_single_quote(&real_home.join(".bash_login"));
@@ -204,17 +200,17 @@ fn prepare_bash_rcfile(script: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
     let content = format!(
         "if [ -f {real_bashrc_q} ]; then\n  . {real_bashrc_q}\nelif [ -f {real_bash_profile_q} ]; then\n  . {real_bash_profile_q}\nelif [ -f {real_bash_login_q} ]; then\n  . {real_bash_login_q}\nelif [ -f {real_profile_q} ]; then\n  . {real_profile_q}\nfi\n[ -f {script_q} ] && . {script_q}\n"
     );
-    atomic_file::write(&rcfile, content.as_bytes(), Access::Inherit).ok()?;
-    Some((rcfile, session_dir))
+    atomic_file::write(&rcfile, content.as_bytes(), Access::Inherit)?;
+    Ok((rcfile, session_dir))
 }
 
 /// Build a temporary ZDOTDIR that sources the user's real zsh startup files and then
 /// our integration script. This means cmdq users get OSC 133 even without
 /// running `--install-integration`.
-fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
+fn prepare_zdotdir(script: &Path) -> Result<PathBuf> {
     let zdotdir = prepare_session_dir("zsh")?;
 
-    let real_zdotdir = zsh_dot_dir()?;
+    let real_zdotdir = zsh_dot_dir().context("no home directory")?;
     let real_zshenv = real_zdotdir.join(".zshenv");
 
     let zdotdir_q = shell_single_quote(&zdotdir);
@@ -230,13 +226,13 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
          export _CMDQ_SYNTHETIC_ZDOTDIR _CMDQ_USER_ZDOTDIR\n\
          export ZDOTDIR=\"$_CMDQ_SYNTHETIC_ZDOTDIR\"\n"
     );
-    atomic_file::write(&zdotdir.join(".zshenv"), zshenv.as_bytes(), Access::Inherit).ok()?;
+    atomic_file::write(&zdotdir.join(".zshenv"), zshenv.as_bytes(), Access::Inherit)?;
 
     // Source the user's file at top level, never from inside a function:
     // `typeset -U path PATH` or `typeset -U fpath` at the top of a zshrc
     // would otherwise become function-local and vanish (taking every
     // autoloadable function, including add-zsh-hook, with it).
-    let mk = |dest: &Path, file: &str, also_source_integration: bool| -> Option<()> {
+    let mk = |dest: &Path, file: &str, also_source_integration: bool| -> Result<()> {
         let mut content = format!(
             "if [[ -n \"${{_CMDQ_USER_ZDOTDIR:-}}\" && -f \"$_CMDQ_USER_ZDOTDIR/{file}\" ]]; then\n\
              \x20 _cmdq_saved_zdotdir=\"${{ZDOTDIR:-}}\"\n\
@@ -250,7 +246,7 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
             let script_q = shell_single_quote(script);
             content.push_str(&format!("[ -f {script_q} ] && source {script_q}\n"));
         }
-        atomic_file::write(dest, content.as_bytes(), Access::Inherit).ok()
+        atomic_file::write(dest, content.as_bytes(), Access::Inherit)
     };
 
     mk(&zdotdir.join(".zprofile"), ".zprofile", false)?;
@@ -258,12 +254,15 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
     mk(&zdotdir.join(".zshrc"), ".zshrc", true)?;
     mk(&zdotdir.join(".zlogin"), ".zlogin", false)?;
 
-    Some(zdotdir)
+    Ok(zdotdir)
 }
 
-fn prepare_session_dir(prefix: &str) -> Option<PathBuf> {
-    let base = crate::paths::data_dir()?.join("cmdq").join("sessions");
-    std::fs::create_dir_all(&base).ok()?;
+fn prepare_session_dir(prefix: &str) -> Result<PathBuf> {
+    let base = crate::paths::data_dir()
+        .context("could not locate home/data dir")?
+        .join("cmdq")
+        .join("sessions");
+    std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
     cleanup_stale_session_dirs(&base);
     for attempt in 0..100 {
         let dir = base.join(format!(
@@ -273,12 +272,12 @@ fn prepare_session_dir(prefix: &str) -> Option<PathBuf> {
             attempt
         ));
         match std::fs::create_dir(&dir) {
-            Ok(()) => return Some(dir),
+            Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return None,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
         }
     }
-    None
+    anyhow::bail!("could not create a session directory in {}", base.display())
 }
 
 fn cleanup_stale_session_dirs(base: &Path) {
@@ -315,7 +314,7 @@ fn session_dir_created_nanos(name: &str) -> Option<u128> {
     let _attempt = parts.next()?;
     let suffix = parts.next()?.parse::<u128>().ok()?;
     let _prefix_and_pid = parts.next()?;
-    Some(suffix / 1000)
+    Some(atomic_file::unique_suffix_nanos(suffix))
 }
 
 #[cfg(test)]

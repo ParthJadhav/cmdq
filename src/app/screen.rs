@@ -27,10 +27,9 @@ const PANEL_MIN_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 const MIN_PANEL_COLS: u16 = 20;
 const MIN_PANEL_ROWS: u16 = 5;
 
-pub(super) const ALT_SCREEN_EXIT: &str = "\x1b[?1049l\x1b[?1047l\x1b[?47l";
-pub(super) const MOUSE_TRACKING_OFF: &str =
-    "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
-pub(super) const FOCUS_EVENTS_OFF: &str = "\x1b[?1004l";
+const ALT_SCREEN_EXIT: &str = "\x1b[?1049l\x1b[?1047l\x1b[?47l";
+const MOUSE_TRACKING_OFF: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+const FOCUS_EVENTS_OFF: &str = "\x1b[?1004l";
 
 /// Whether cmdq is currently reserving panel rows on the user's terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,12 +112,15 @@ impl Screen {
         self.cursor.set_position(col, row);
     }
 
-    /// Move to `desired`: release/reserve rows, resize the PTY, record the
-    /// layout for the exit paths, re-sync the cursor tracker and repaint.
+    /// Move to `desired`: release/reserve rows, size the PTY to the rows the
+    /// shell owns, record the layout for the exit paths, re-sync the cursor
+    /// tracker and repaint. Re-sizing to an unchanged size is free: the
+    /// kernel only signals the shell when the size differs.
     pub(super) fn set_layout(&mut self, desired: PanelLayout) -> Result<()> {
         if self.layout != desired {
             self.transition(desired)?;
         }
+        self.resize_pty();
         self.record_layout();
         self.sync_cursor_tracker();
         self.paint.force();
@@ -150,7 +152,6 @@ impl Screen {
             panel::reserve(&mut self.out, height, rows, cols, shell_cursor)?;
         }
         self.layout = desired;
-        self.resize_pty();
         Ok(())
     }
 
@@ -184,6 +185,29 @@ impl Screen {
             restore.layout = self.layout;
             restore.rows = self.rows;
         }
+    }
+
+    /// Turn off terminal modes a finished program left on.
+    pub(super) fn end_child_modes(
+        &mut self,
+        alt_screen: bool,
+        mouse_capture: bool,
+        focus_events: bool,
+    ) -> Result<()> {
+        if alt_screen {
+            write!(self.out, "{ALT_SCREEN_EXIT}")?;
+        }
+        if mouse_capture {
+            write!(self.out, "{MOUSE_TRACKING_OFF}")?;
+        }
+        if focus_events {
+            write!(self.out, "{FOCUS_EVENTS_OFF}")?;
+        }
+        if alt_screen || mouse_capture || focus_events {
+            self.out.flush()?;
+        }
+        self.record_alt_screen(false);
+        Ok(())
     }
 
     pub(super) fn record_alt_screen(&self, alt_screen: bool) {
@@ -226,9 +250,9 @@ impl Screen {
         // stale old-size coordinates.
         if old_reserved && shrinking {
             self.layout = PanelLayout::Hidden;
-        } else {
+        } else if old_reserved {
             self.transition(PanelLayout::Hidden)?;
-            self.record_layout();
+            self.resize_pty();
         }
         self.cols = new_cols;
         self.rows = new_rows;

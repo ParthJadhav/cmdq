@@ -36,6 +36,13 @@ pub struct QueueItem {
     pub origin_cwd: Option<PathBuf>,
 }
 
+impl QueueItem {
+    /// A chained item is skipped unless the command before it succeeded.
+    pub fn skipped_after(&self, prev_exit: Option<i32>) -> bool {
+        self.conditional && prev_exit != Some(0)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Queue {
     #[serde(deserialize_with = "deserialize_unique_items")]
@@ -100,7 +107,7 @@ impl Queue {
         &self.items
     }
 
-    pub fn item_ids(&self) -> HashSet<u64> {
+    fn item_ids(&self) -> HashSet<u64> {
         self.items.iter().map(|it| it.id).collect()
     }
 
@@ -235,7 +242,7 @@ impl Queue {
     /// `prev_exit != Some(0)`. Returns the first item that is allowed to run.
     pub fn pop_next_eligible(&mut self, prev_exit: Option<i32>) -> Option<QueueItem> {
         while let Some(front) = self.items.first() {
-            if front.conditional && prev_exit != Some(0) {
+            if front.skipped_after(prev_exit) {
                 self.items.remove(0);
                 continue;
             }
@@ -320,7 +327,7 @@ impl Queue {
                 while disk
                     .items
                     .first()
-                    .is_some_and(|item| item.conditional && prev_exit != Some(0))
+                    .is_some_and(|item| item.skipped_after(prev_exit))
                 {
                     disk.items.remove(0);
                     skipped = true;
@@ -727,6 +734,10 @@ fn lock_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!("{file_name}.lock"))
 }
 
+const QUEUE_FILE_NAME: &str = "queue.json";
+/// Per-launch queue directories live here, under the queue data dir.
+const SESSION_QUEUES_DIR: &str = "queues";
+
 /// Allocate a fresh queue file for this launch. Atomically reserving a directory
 /// prevents reuse even after PID recycling or a clock adjustment. Do not derive
 /// identity from cwd, the parent process, or inherited environment variables:
@@ -736,7 +747,7 @@ pub fn new_session_path() -> Result<PathBuf> {
 }
 
 fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
-    let queues_dir = data_dir.join("queues");
+    let queues_dir = data_dir.join(SESSION_QUEUES_DIR);
     std::fs::create_dir_all(&queues_dir)
         .with_context(|| format!("creating queue directory {}", queues_dir.display()))?;
     sweep_stale_queue_dirs_at(&queues_dir, SystemTime::now());
@@ -747,7 +758,7 @@ fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
     for attempt in 0u64.. {
         let dir = queues_dir.join(format!("{}-{timestamp}-{attempt}", std::process::id()));
         match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir.join("queue.json")),
+            Ok(()) => return Ok(dir.join(QUEUE_FILE_NAME)),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
         }
@@ -759,7 +770,7 @@ fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
 /// best-effort: failure to tidy state must not turn a successful shell exit
 /// into an application error.
 pub fn remove_session_dir(queue_path: &Path) {
-    if queue_path.file_name().and_then(|name| name.to_str()) != Some("queue.json") {
+    if queue_path.file_name().and_then(|name| name.to_str()) != Some(QUEUE_FILE_NAME) {
         return;
     }
     let Some(session_dir) = queue_path.parent() else {
@@ -769,7 +780,7 @@ pub fn remove_session_dir(queue_path: &Path) {
         .parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        != Some("queues")
+        != Some(SESSION_QUEUES_DIR)
     {
         return;
     }
@@ -785,7 +796,7 @@ fn sweep_stale_queue_dirs_at(queues_dir: &Path, now: SystemTime) {
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
-        let queue_path = dir.join("queue.json");
+        let queue_path = dir.join(QUEUE_FILE_NAME);
         if crate::session_lease::active_peer_count(&queue_path).unwrap_or(0) > 0 {
             continue;
         }
@@ -813,7 +824,7 @@ fn sweep_stale_queue_dirs_at(queues_dir: &Path, now: SystemTime) {
 /// Legacy shared persistence path: `$XDG_DATA_HOME/cmdq/queue.json`,
 /// the platform data directory, or `~/.cmdq/queue.json`.
 pub fn try_default_path() -> Result<PathBuf> {
-    Ok(queue_data_dir()?.join("queue.json"))
+    Ok(queue_data_dir()?.join(QUEUE_FILE_NAME))
 }
 
 /// Where cmdq keeps queues: the legacy `queue.json` and per-session `queues/`.

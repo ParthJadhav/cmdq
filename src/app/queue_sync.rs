@@ -140,12 +140,10 @@ fn cwd_warning(origins: &[PathBuf], current: &Path, action: &str) -> Option<Stri
 
 /// Persist local queue changes, merging what other sessions wrote meanwhile.
 pub(super) fn save_queue_if_dirty(state: &mut AppState) {
-    let Some(queue_path) = state.queue_path.clone() else {
-        return;
-    };
     if !state.queue_dirty {
         return;
     }
+    let queue_path = state.queue_path.clone();
     match state.queue.save_preserving_unseen(
         &queue_path,
         &mut state.queue_known_items,
@@ -174,9 +172,7 @@ fn report_queue_error(state: &mut AppState, context: &str, error: &anyhow::Error
 /// Adopt changes other sessions made to this queue's file, unless a local
 /// change is unsaved or a draft/edit would be disturbed (then only say so).
 pub(super) fn sync_queue_from_disk_if_due(state: &mut AppState, last_sync: &mut Instant) {
-    let Some(queue_path) = state.queue_path.clone() else {
-        return;
-    };
+    let queue_path = state.queue_path.clone();
     if last_sync.elapsed() < QUEUE_SYNC_INTERVAL {
         return;
     }
@@ -249,14 +245,6 @@ fn notify_deferred_queue_change_if_needed(state: &mut AppState, queue_path: &Pat
         }
         Err(e) => report_queue_error(state, "queue sync waiting for edit", &e),
     }
-}
-
-/// While a change from another session waits for the user's edit, keep
-/// saying so instead of letting the status fade.
-pub(super) fn deferred_queue_change_status_if_pending(state: &AppState) -> Option<&'static str> {
-    state
-        .queue_external_change_pending
-        .then_some(DEFERRED_QUEUE_CHANGE_STATUS)
 }
 
 fn apply_queue_merge_status(

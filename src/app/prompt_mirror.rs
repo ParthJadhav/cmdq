@@ -1,3 +1,6 @@
+//! Following what the user types at the shell prompt, to tell when Enter
+//! starts a command.
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::shell_syntax::{
@@ -76,12 +79,7 @@ impl PromptMirror {
         let edit: Edit = match key.code {
             KeyCode::Char(c) if !ctrl && !alt => {
                 if self.reliable {
-                    let mut buf = [0u8; 4];
-                    text_edit::insert_str(
-                        &mut self.line,
-                        &mut self.cursor,
-                        c.encode_utf8(&mut buf),
-                    );
+                    text_edit::insert_char(&mut self.line, &mut self.cursor, c);
                 }
                 return None;
             }
@@ -121,8 +119,8 @@ impl PromptMirror {
                     return None;
                 }
             },
-            KeyCode::Char('b' | 'B') => word_left,
-            KeyCode::Char('f' | 'F') => word_right,
+            KeyCode::Char('b' | 'B') if alt => word_left,
+            KeyCode::Char('f' | 'F') if alt => word_right,
             KeyCode::Enter => {
                 let submitted = self.reliable.then(|| self.line.clone());
                 self.submit(submitted.as_deref());

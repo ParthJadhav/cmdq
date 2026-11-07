@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use super::AppState;
-use super::queue_sync::deferred_queue_change_status_if_pending;
+use super::queue_sync::DEFERRED_QUEUE_CHANGE_STATUS;
 use crate::panel::StatusKind;
 
 /// Status messages ("added: ls", "queue cleared", …) fade after this so the
@@ -53,9 +53,12 @@ impl AppState {
         {
             return;
         }
-        match deferred_queue_change_status_if_pending(self) {
-            Some(status) => self.set_status(status),
-            None => self.clear_status(),
+        // While a change from another session waits for the user's edit,
+        // keep saying so instead of letting the status fade.
+        if self.queue_external_change_pending {
+            self.set_status(DEFERRED_QUEUE_CHANGE_STATUS);
+        } else {
+            self.clear_status();
         }
     }
 }

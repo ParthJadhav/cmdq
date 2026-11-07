@@ -45,23 +45,31 @@ fn panel_delay() -> Duration {
 }
 
 fn handle_key(key: KeyEvent, state: &mut AppState, shell: &mut Shell) -> KeyOutcome {
-    keys::handle_key(key, state, &mut ShellInput::new(shell.as_mut(), None), None)
+    keys::handle_key(key, state, &mut ShellInput::detached(shell.as_mut()), None)
 }
 
 fn handle_paste(text: String, state: &mut AppState, shell: &mut Shell) {
-    keys::handle_paste(text, state, &mut ShellInput::new(shell.as_mut(), None));
+    keys::handle_paste(text, state, &mut ShellInput::detached(shell.as_mut()));
 }
 
 fn handle_command_end(state: &mut AppState, exit_code: Option<i32>, shell: &mut Shell) -> bool {
-    lifecycle::handle_command_end(state, exit_code, &mut ShellInput::new(shell.as_mut(), None))
+    lifecycle::handle_command_end(state, exit_code, &mut ShellInput::detached(shell.as_mut()))
 }
 
 fn dispatch_next_eligible(state: &mut AppState, prev_exit: Option<i32>, shell: &mut Shell) -> bool {
-    lifecycle::dispatch_next_eligible(state, prev_exit, &mut ShellInput::new(shell.as_mut(), None))
+    lifecycle::dispatch_next_eligible(state, prev_exit, &mut ShellInput::detached(shell.as_mut()))
 }
 
 fn toggle_queue_pause(state: &mut AppState, shell: &mut Shell) {
-    queue_actions::toggle_queue_pause(state, &mut ShellInput::new(shell.as_mut(), None));
+    queue_actions::toggle_queue_pause(state, &mut ShellInput::detached(shell.as_mut()));
+}
+
+fn test_queue_path() -> PathBuf {
+    static DIR: std::sync::LazyLock<tempfile::TempDir> =
+        std::sync::LazyLock::new(|| tempfile::tempdir().unwrap());
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    DIR.path().join(n.to_string()).join("queue.json")
 }
 
 fn make_state() -> AppState {
@@ -97,7 +105,7 @@ fn make_state() -> AppState {
         status_set_at: None,
         queue_dirty: false,
         queue_save_error: None,
-        queue_path: None,
+        queue_path: test_queue_path(),
         queue_known_items: Vec::new(),
         queue_known_paused: false,
         queue_external_change_pending: false,
@@ -265,6 +273,7 @@ fn exit_130_pauses_even_without_recent_sigint() {
 fn normal_exit_dispatches_next() {
     let mut state = make_state();
     state.queue.push("echo a", false);
+    state.queue_dirty = true;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
     assert!(handle_command_end(&mut state, Some(0), &mut w));
@@ -286,13 +295,13 @@ fn concurrent_command_end_only_one_session_claims_item() {
     base.save(&queue_path).unwrap();
 
     let mut first = make_state();
-    first.queue_path = Some(queue_path.clone());
+    first.queue_path = queue_path.clone();
     first.queue = Queue::load_or_default(&queue_path);
     first.queue_known_items = first.queue.item_snapshot();
     first.queue_known_paused = first.queue.paused;
 
     let mut second = make_state();
-    second.queue_path = Some(queue_path.clone());
+    second.queue_path = queue_path.clone();
     second.queue = Queue::load_or_default(&queue_path);
     second.queue_known_items = second.queue.item_snapshot();
     second.queue_known_paused = second.queue.paused;
@@ -324,7 +333,7 @@ fn command_end_does_not_dispatch_item_cleared_by_another_session() {
     base.save(&queue_path).unwrap();
 
     let mut state = make_state();
-    state.queue_path = Some(queue_path.clone());
+    state.queue_path = queue_path.clone();
     state.queue = Queue::load_or_default(&queue_path);
     state.queue_known_items = state.queue.item_snapshot();
     state.queue_known_paused = state.queue.paused;
@@ -351,7 +360,7 @@ fn dispatch_failure_rolls_claim_back_to_disk_paused() {
     base.save(&queue_path).unwrap();
 
     let mut state = make_state();
-    state.queue_path = Some(queue_path.clone());
+    state.queue_path = queue_path.clone();
     state.queue = Queue::load_or_default(&queue_path);
     state.queue_known_items = state.queue.item_snapshot();
     state.queue_known_paused = state.queue.paused;
@@ -385,7 +394,7 @@ fn claim_io_failure_pauses_without_writing_to_the_shell() {
     let mut state = make_state();
     let path = temp.path().join("queue.json");
     std::fs::create_dir(&path).unwrap();
-    state.queue_path = Some(path);
+    state.queue_path = path;
     state.queue.push("echo keep", false);
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let mut writer: Box<dyn Write + Send> = Box::new(VecWriter(bytes.clone()));
@@ -439,13 +448,14 @@ fn command_end_pauses_before_dispatch_when_shell_cwd_changed() {
     state.shell_cwd = Some(PathBuf::from("/tmp/current"));
     state.queue.set_origin_cwd("/tmp/original");
     state.queue.push("echo keep-me", false);
+    state.queue_dirty = true;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
 
     assert!(!handle_command_end(&mut state, Some(0), &mut w));
 
     assert!(state.queue.paused);
-    assert!(state.queue_dirty);
+    assert!(Queue::load_or_default(&state.queue_path).paused);
     assert!(state.status.contains("Ctrl-X to run here"));
     assert!(state.resume_cwd_confirmation_started_at.is_some());
     assert!(buf.lock().unwrap().is_empty());
@@ -472,6 +482,7 @@ fn failed_command_skips_foreign_conditional_before_cwd_warning() {
         false,
         Some(PathBuf::from("/tmp/current")),
     );
+    state.queue_dirty = true;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
 
@@ -490,6 +501,7 @@ fn failed_command_skips_foreign_conditional_before_cwd_warning() {
 fn dispatch_failure_keeps_command_and_pauses_queue() {
     let mut state = make_state();
     state.queue.push("echo keep-me", false);
+    state.queue_dirty = true;
     let mut w: Box<dyn Write + Send> = Box::new(FailingWriter);
 
     assert!(!dispatch_next_eligible(&mut state, Some(0), &mut w));
@@ -497,7 +509,9 @@ fn dispatch_failure_keeps_command_and_pauses_queue() {
     assert_eq!(state.queue.len(), 1);
     assert_eq!(state.queue.front().unwrap().command, "echo keep-me");
     assert!(state.queue.paused);
-    assert!(state.queue_dirty);
+    let disk = Queue::load_or_default(&state.queue_path);
+    assert!(disk.paused);
+    assert_eq!(disk.front().unwrap().command, "echo keep-me");
     assert!(state.status.contains("dispatch failed"));
 }
 
@@ -506,6 +520,7 @@ fn dispatch_failure_after_conditional_skip_preserves_next_command() {
     let mut state = make_state();
     state.queue.push("echo skipped", true);
     state.queue.push("echo keep-me", false);
+    state.queue_dirty = true;
     let mut w: Box<dyn Write + Send> = Box::new(FailingWriter);
 
     assert!(!dispatch_next_eligible(&mut state, Some(1), &mut w));
@@ -513,7 +528,9 @@ fn dispatch_failure_after_conditional_skip_preserves_next_command() {
     assert_eq!(state.queue.len(), 1);
     assert_eq!(state.queue.front().unwrap().command, "echo keep-me");
     assert!(state.queue.paused);
-    assert!(state.queue_dirty);
+    let disk = Queue::load_or_default(&state.queue_path);
+    assert!(disk.paused);
+    assert_eq!(disk.front().unwrap().command, "echo keep-me");
 }
 
 #[test]
@@ -524,7 +541,7 @@ fn dispatch_persists_removed_item_immediately() {
     state.queue.push("echo once", false);
     state.queue.save(&queue_path).unwrap();
     state.queue_known_items = state.queue.item_snapshot();
-    state.queue_path = Some(queue_path.clone());
+    state.queue_path = queue_path.clone();
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
 
@@ -543,6 +560,7 @@ fn resume_paused_queue_at_prompt_dispatches_immediately() {
     state.queue.paused = true;
     state.force_queue = true;
     state.queue.push("echo resumed", false);
+    state.queue_dirty = true;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
 
@@ -555,7 +573,7 @@ fn resume_paused_queue_at_prompt_dispatches_immediately() {
     assert!(!state.queue.paused);
     assert!(state.queue.is_empty());
     assert_eq!(&*buf.lock().unwrap(), b"echo resumed\n");
-    assert!(state.queue_dirty);
+    assert!(Queue::load_or_default(&state.queue_path).is_empty());
 }
 
 #[test]
@@ -588,6 +606,7 @@ fn resume_paused_queue_at_prompt_does_not_fake_success_for_conditional() {
     state.queue.paused = true;
     state.force_queue = true;
     state.queue.push("echo should-skip", true);
+    state.queue_dirty = true;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
 
@@ -604,7 +623,7 @@ fn resume_paused_queue_at_prompt_does_not_fake_success_for_conditional() {
     );
     assert!(buf.lock().unwrap().is_empty());
     assert!(state.status.contains("skipped chained item"));
-    assert!(state.queue_dirty);
+    assert!(Queue::load_or_default(&state.queue_path).is_empty());
 }
 
 #[test]
@@ -612,6 +631,7 @@ fn old_sigint_does_not_pause() {
     let mut state = make_state();
     state.queue.push("echo a", false);
     state.last_sigint_at = Some(Instant::now() - Duration::from_secs(10));
+    state.queue_dirty = true;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
     handle_command_end(&mut state, Some(0), &mut w);
@@ -1574,7 +1594,7 @@ fn startup_local_pause_does_not_persist_over_live_unpaused_queue() {
     } = prepare_queue_for_startup(&mut restored, Some(Path::new("/tmp/cmdq-test")), 0);
 
     let mut state = make_state();
-    state.queue_path = Some(queue_path.clone());
+    state.queue_path = queue_path.clone();
     state.queue = restored;
     state.queue_known_items = state.queue.item_snapshot();
     state.queue_known_paused = known_paused;
@@ -1850,7 +1870,7 @@ fn queue_save_failure_keeps_dirty_and_surfaces_status() {
     let queue_path = not_a_dir.join("queue.json");
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path);
+    s.queue_path = queue_path;
     s.queue.push("echo persist-me", false);
     s.queue_dirty = true;
 
@@ -1870,7 +1890,7 @@ fn queue_save_merges_unseen_external_items() {
     external.save(&queue_path).unwrap();
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.queue.push("echo local", false);
     s.queue_dirty = true;
 
@@ -1903,7 +1923,7 @@ fn queue_save_reports_corrupt_disk_backup() {
     std::fs::write(&queue_path, b"{broken queue").unwrap();
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.queue.push("echo local", false);
     s.queue_dirty = true;
 
@@ -1926,7 +1946,7 @@ fn queue_save_pauses_after_merging_unseen_external_items() {
     external.save(&queue_path).unwrap();
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.queue.push("echo local", false);
     s.queue_dirty = true;
 
@@ -1953,7 +1973,7 @@ fn saved_edit_is_not_lost_when_another_session_deletes_item() {
     base.save(&queue_path).unwrap();
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.queue = Queue::load_or_default(&queue_path);
     s.queue_known_items = s.queue.item_snapshot();
     s.queue_known_paused = s.queue.paused;
@@ -1989,7 +2009,7 @@ fn idle_queue_sync_merges_external_items_and_pauses() {
     let queue_path = temp.path().join("queue.json");
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.queue.push("echo local", false);
     s.queue.save(&queue_path).unwrap();
     s.queue_known_items = s.queue.item_snapshot();
@@ -2025,7 +2045,7 @@ fn idle_queue_sync_reports_external_change_during_draft_without_clobbering_input
     let queue_path = temp.path().join("queue.json");
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.force_queue = true;
     s.queue.push("echo local", false);
     s.queue.save(&queue_path).unwrap();
@@ -2092,7 +2112,7 @@ fn deferred_external_change_warning_clears_when_disk_returns_to_known_state() {
     let queue_path = temp.path().join("queue.json");
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.force_queue = true;
     s.queue.push("echo local", false);
     s.queue.save(&queue_path).unwrap();
@@ -2125,7 +2145,7 @@ fn idle_queue_sync_reports_external_change_during_item_edit_without_clobbering_e
     let queue_path = temp.path().join("queue.json");
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.queue.push("echo local", false);
     s.queue.save(&queue_path).unwrap();
     s.queue_known_items = s.queue.item_snapshot();
@@ -2152,7 +2172,7 @@ fn idle_queue_sync_adopts_external_clear() {
     let queue_path = temp.path().join("queue.json");
 
     let mut s = make_state();
-    s.queue_path = Some(queue_path.clone());
+    s.queue_path = queue_path.clone();
     s.queue.push("echo clear me", false);
     s.queue.save(&queue_path).unwrap();
     s.queue_known_items = s.queue.item_snapshot();
@@ -2543,6 +2563,7 @@ fn skipped_batch_remains_recoverable_after_later_command_dispatches() {
     s.queue.push("skip one", true);
     s.queue.push("skip two", true);
     s.queue.push("echo run", false);
+    s.queue_dirty = true;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let mut w: Box<dyn Write + Send> = Box::new(VecWriter(buf.clone()));
     assert!(dispatch_next_eligible(&mut s, Some(7), &mut w));

@@ -7,7 +7,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::atomic_file::{self, Access};
 
+/// How often a running session rewrites its lease.
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// A lease older than this belongs to a session that is gone.
 const LEASE_TTL: Duration = Duration::from_secs(5);
+const _: () = assert!(LEASE_TTL.as_millis() > 2 * REFRESH_INTERVAL.as_millis());
+const LEASE_FILE_PREFIX: &str = "session-";
+const LEASE_FILE_SUFFIX: &str = ".json";
 
 #[derive(Debug)]
 pub struct SessionLease {
@@ -53,7 +59,7 @@ impl SessionLease {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating session lease dir {}", dir.display()))?;
         let path = dir.join(format!(
-            "session-{}-{}.json",
+            "{LEASE_FILE_PREFIX}{}-{}{LEASE_FILE_SUFFIX}",
             std::process::id(),
             atomic_file::unique_suffix()
         ));
@@ -104,6 +110,17 @@ pub fn active_peer_count(queue_path: &Path) -> Result<usize> {
     let mut count = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
+        // Skip other sessions' in-flight temp files: they hold a complete
+        // record too, so reading them would count a session twice.
+        let is_lease = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with(LEASE_FILE_PREFIX) && name.ends_with(LEASE_FILE_SUFFIX)
+            });
+        if !is_lease {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };

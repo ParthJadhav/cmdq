@@ -10,7 +10,7 @@ use super::queue_sync::{
     current_shell_cwd, dispatch_cwd_warning_for_item, resume_cwd_warning_for_current_shell,
     save_queue_if_dirty,
 };
-use super::screen::{ALT_SCREEN_EXIT, FOCUS_EVENTS_OFF, MOUSE_TRACKING_OFF, Screen};
+use super::screen::Screen;
 use super::status::truncate_for_status;
 use super::{AppState, ShellState};
 use crate::osc133;
@@ -32,9 +32,20 @@ pub(super) struct ShellInput<'a> {
 }
 
 impl<'a> ShellInput<'a> {
-    /// `screen` is `None` only where no terminal exists (unit tests).
-    pub(super) fn new(writer: &'a mut dyn Write, screen: Option<&'a mut Screen>) -> Self {
-        Self { writer, screen }
+    pub(super) fn new(writer: &'a mut dyn Write, screen: &'a mut Screen) -> Self {
+        Self {
+            writer,
+            screen: Some(screen),
+        }
+    }
+
+    /// Without a terminal: unit tests drive the app state directly.
+    #[cfg(test)]
+    pub(super) fn detached(writer: &'a mut dyn Write) -> Self {
+        Self {
+            writer,
+            screen: None,
+        }
     }
 
     /// Forward input typed for the shell or the running program. A closed
@@ -101,14 +112,14 @@ pub(super) fn handle_osc_event(
                 state.pending_bash_exit = Some(exit_code);
                 return Ok(());
             }
+            let dispatched =
+                handle_command_end(state, exit_code, &mut ShellInput::new(shell, screen));
             if bash_prompt_ready {
                 // Reassert even if the layout is unchanged: readline's
                 // get/set-winsize pair can overwrite an earlier resize. B
                 // follows that pair.
                 screen.resize_pty();
             }
-            let dispatched =
-                handle_command_end(state, exit_code, &mut ShellInput::new(shell, Some(screen)));
             if !dispatched
                 && !state.queue.paused
                 && !state.force_queue
@@ -130,20 +141,8 @@ fn restore_child_terminal_modes_after_command(
     screen: &mut Screen,
 ) -> Result<()> {
     let child = state.child;
-    if child.alt_screen {
-        write!(screen.out, "{ALT_SCREEN_EXIT}")?;
-    }
-    if child.mouse_capture {
-        write!(screen.out, "{MOUSE_TRACKING_OFF}")?;
-    }
-    if child.focus_events {
-        write!(screen.out, "{FOCUS_EVENTS_OFF}")?;
-    }
-    if child.alt_screen || child.mouse_capture || child.focus_events {
-        screen.out.flush()?;
-    }
+    screen.end_child_modes(child.alt_screen, child.mouse_capture, child.focus_events)?;
     state.reset_child_modes();
-    screen.record_alt_screen(false);
     Ok(())
 }
 
@@ -186,11 +185,7 @@ pub(super) fn refresh_auto_passthrough_for_child_modes(
     if let Some(status) = status {
         state.set_status_as(crate::panel::StatusKind::Routine, status);
     }
-    let desired = state.desired_layout(screen.rows());
-    if desired != screen.layout() {
-        screen.set_layout(desired)?;
-    }
-    Ok(())
+    state.apply_desired_layout(screen)
 }
 
 pub(super) fn mark_command_started(state: &mut AppState) {
@@ -240,7 +235,8 @@ pub(super) fn handle_command_end(
 
 /// Send the next runnable queued command to the shell and mark it running.
 /// Chained items whose predecessor failed are skipped into the recovery
-/// batch. Returns whether a command was sent.
+/// batch. The claim goes through the queue file, so only one session runs
+/// each item. Returns whether a command was sent.
 pub(super) fn dispatch_next_eligible(
     state: &mut AppState,
     prev_exit: Option<i32>,
@@ -249,127 +245,102 @@ pub(super) fn dispatch_next_eligible(
     if state.pending_bash_exit.is_some() {
         return false;
     }
-    if state.queue_dirty && state.queue_path.is_some() {
+    if state.queue_dirty {
         save_queue_if_dirty(state);
         if state.queue_dirty || state.queue.paused {
             return false;
         }
     }
 
-    let mut skipped_conditional = false;
-    while let Some(item) = state.queue.front().cloned() {
-        if item.conditional && prev_exit != Some(0) {
-            let _ = state.queue.remove(item.id);
-            if !skipped_conditional {
-                state.recovery.clear();
-            }
-            state.recovery.push((state.recovery.len(), item));
-            state.activity = Some(format!(
-                "{} skipped — previous command did not succeed",
-                state.recovery.len()
-            ));
-            skipped_conditional = true;
-            continue;
-        }
-
-        if let Some(queue_path) = state.queue_path.clone() {
-            let current_cwd = current_shell_cwd(state).cloned();
-            let claim = state.queue.claim_next_eligible_if_current(
-                &queue_path,
-                item.id,
-                prev_exit,
-                current_cwd.as_deref(),
-                &mut state.queue_known_items,
-                &mut state.queue_known_paused,
-            );
-            match claim {
-                Ok(queue::QueueClaim::Claimed(item)) => {
-                    if let Err(e) = shell.send_command(&item.command, state.shell_kind) {
-                        let rollback = state.queue.restore_claimed_front(
-                            &queue_path,
-                            item,
-                            &mut state.queue_known_items,
-                            &mut state.queue_known_paused,
-                        );
-                        state.queue_dirty = rollback.is_err();
-                        report_dispatch_failure(state, &e);
-                        return false;
-                    }
-                    state.queue_dirty = false;
-                    command_dispatched(state, &item.command);
-                    return true;
-                }
-                Ok(queue::QueueClaim::BlockedByCwd(item)) => {
-                    state.queue_dirty = false;
-                    state.resume_cwd_warning = resume_cwd_warning_for_current_shell(state);
-                    state.resume_cwd_confirmation_started_at = Some(Instant::now());
-                    if let Some(current) = current_shell_cwd(state)
-                        && let Some(warning) =
-                            dispatch_cwd_warning_for_item(&state.queue, &item, current)
-                    {
-                        state.set_status(warning);
-                    }
-                    return false;
-                }
-                Ok(queue::QueueClaim::Stale) => {
-                    state.queue_dirty = false;
-                    state.set_status("queue changed in another session");
-                    return false;
-                }
-                Err(e) => {
-                    state.queue.paused = true;
-                    state.queue_dirty = true;
-                    state.set_status(format!("queue dispatch sync failed: {e}"));
-                    return false;
-                }
-            }
-        }
-
-        if let Some(current) = current_shell_cwd(state)
-            && let Some(warning) = dispatch_cwd_warning_for_item(&state.queue, &item, current)
-        {
-            state.queue.paused = true;
+    let skipped = skip_failed_chain(state, prev_exit);
+    let Some(item) = state.queue.front().cloned() else {
+        if skipped {
             state.queue_dirty = true;
+            state.forget_resume_cwd_warning_if_empty();
+            state.set_status("skipped chained item: previous command did not succeed");
+            save_queue_if_dirty(state);
+        }
+        return false;
+    };
+
+    let queue_path = state.queue_path.clone();
+    let current_cwd = current_shell_cwd(state).cloned();
+    let claim = state.queue.claim_next_eligible_if_current(
+        &queue_path,
+        item.id,
+        prev_exit,
+        current_cwd.as_deref(),
+        &mut state.queue_known_items,
+        &mut state.queue_known_paused,
+    );
+    match claim {
+        Ok(queue::QueueClaim::Claimed(item)) => {
+            if let Err(e) = shell.send_command(&item.command, state.shell_kind) {
+                let rollback = state.queue.restore_claimed_front(
+                    &queue_path,
+                    item,
+                    &mut state.queue_known_items,
+                    &mut state.queue_known_paused,
+                );
+                state.queue_dirty = rollback.is_err();
+                state.set_status(format!(
+                    "dispatch failed; queue paused: {}",
+                    truncate_for_status(&e.to_string())
+                ));
+                return false;
+            }
+            state.queue_dirty = false;
+            state.forget_resume_cwd_warning_if_empty();
+            state.set_status_as(
+                crate::panel::StatusKind::Routine,
+                format!("dispatched: {}", truncate_for_status(&item.command)),
+            );
+            mark_command_started(state);
+            true
+        }
+        Ok(queue::QueueClaim::BlockedByCwd(item)) => {
+            state.queue_dirty = false;
             state.resume_cwd_warning = resume_cwd_warning_for_current_shell(state);
             state.resume_cwd_confirmation_started_at = Some(Instant::now());
-            state.set_status(warning);
-            return false;
+            if let Some(current) = current_shell_cwd(state)
+                && let Some(warning) = dispatch_cwd_warning_for_item(&state.queue, &item, current)
+            {
+                state.set_status(warning);
+            }
+            false
         }
-
-        if let Err(e) = shell.send_command(&item.command, state.shell_kind) {
+        Ok(queue::QueueClaim::Stale) => {
+            state.queue_dirty = false;
+            state.set_status("queue changed in another session");
+            false
+        }
+        Err(e) => {
             state.queue.paused = true;
             state.queue_dirty = true;
-            report_dispatch_failure(state, &e);
-            return false;
+            state.set_status(format!("queue dispatch sync failed: {e}"));
+            false
         }
+    }
+}
 
+/// Move leading chained items that may not run after `prev_exit` into a
+/// fresh recovery batch. Returns whether any were skipped.
+fn skip_failed_chain(state: &mut AppState, prev_exit: Option<i32>) -> bool {
+    let mut skipped = false;
+    while let Some(item) = state.queue.front().cloned() {
+        if !item.skipped_after(prev_exit) {
+            break;
+        }
         let _ = state.queue.remove(item.id);
-        state.queue_dirty = true;
-        command_dispatched(state, &item.command);
-        return true;
+        if !skipped {
+            state.recovery.clear();
+        }
+        state.recovery.push((state.recovery.len(), item));
+        state.activity = Some(format!(
+            "{} skipped — previous command did not succeed",
+            state.recovery.len()
+        ));
+        skipped = true;
     }
-
-    if skipped_conditional {
-        state.queue_dirty = true;
-        state.forget_resume_cwd_warning_if_empty();
-        state.set_status("skipped chained item: previous command did not succeed");
-        save_queue_if_dirty(state);
-    }
-    false
-}
-
-fn command_dispatched(state: &mut AppState, command: &str) {
-    state.forget_resume_cwd_warning_if_empty();
-    state.set_status_as(
-        crate::panel::StatusKind::Routine,
-        format!("dispatched: {}", truncate_for_status(command)),
-    );
-    mark_command_started(state);
-}
-
-fn report_dispatch_failure(state: &mut AppState, error: &io::Error) {
-    state.set_status(format!(
-        "dispatch failed; queue paused: {}",
-        truncate_for_status(&error.to_string())
-    ));
+    skipped
 }
