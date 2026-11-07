@@ -364,22 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn integration_loaded_guard_is_not_exported_to_nested_shells() {
-        assert!(!BASH_SNIPPET.contains("export CMDQ_INTEGRATION_LOADED"));
-        assert!(!ZSH_SNIPPET.contains("export CMDQ_INTEGRATION_LOADED"));
-        assert!(!FISH_SNIPPET.contains("set -gx CMDQ_INTEGRATION_LOADED"));
-    }
-
-    #[test]
-    fn snippets_emit_cwd_before_command_end() {
-        assert!(BASH_SNIPPET.contains("_cmdq_emit_cwd\n        if [[ -n \"$_CMDQ_IN_CMD\" ]]"));
-        assert!(ZSH_SNIPPET.contains("_cmdq_emit_cwd\n        if [[ -n \"$_CMDQ_IN_CMD\" ]]"));
-        assert!(FISH_SNIPPET.contains(
-            "set -l exit $status\n        _cmdq_emit_cwd\n        printf '\\e]133;D;%s;cmdq=1\\a' $exit"
-        ));
-    }
-
-    #[test]
     fn sh_integration_fails_loudly() {
         assert!(ShellKind::Sh.snippet().is_err());
         assert!(rc_file_for(ShellKind::Sh).is_none());

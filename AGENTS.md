@@ -14,11 +14,11 @@ the application routes input, dispatches queued commands, and paints a bottom pa
 | Task | Start with | Coverage |
 | --- | --- | --- |
 | CLI and configuration | `src/main.rs::Cli`, `src/config.rs::Config::load` | config unit tests, `tests/binary_smoke.rs` |
-| Queue execution and recovery | `src/app.rs::dispatch_next_eligible`, `src/queue.rs::Queue` | app/queue unit tests, `tests/queue_dispatch_e2e.rs`, `tests/shell_matrix.rs` |
+| Queue execution and recovery | `src/app/lifecycle.rs::dispatch_next_eligible`, `src/queue.rs::Queue` | app/queue unit tests, `tests/shell_matrix.rs` |
 | Session isolation and cleanup | `src/queue.rs::new_session_path`, `remove_session_dir`, `src/session_lease.rs` | queue unit tests, binary smoke |
-| Keys, drafts, and editing | `src/input.rs::LineEditor::handle_key`, app `handle_key_with_bytes` | input/app unit tests, shell matrix |
-| Panel and resize | `src/panel.rs`, app `desired_layout` / `transition_layout`, `src/cursor_tracker.rs` | panel unit tests, `tests/path_a_smoke.rs` |
-| Shell hooks and input ownership | `shell/integration.{bash,zsh,fish}`, `src/pty.rs`, `src/osc133.rs`, `src/mode_detect.rs`, `src/terminal_input.rs` | protocol unit tests, shell matrix, binary smoke |
+| Keys, drafts, and editing | `src/input.rs::LineEditor::handle_key`, `src/app/keys.rs::handle_key`, `src/text_edit.rs` | input/app unit tests, shell matrix |
+| Panel and resize | `src/panel.rs`, `src/app/screen.rs::Screen` (`set_layout`, `resize`), `src/cursor_tracker.rs` | panel unit tests, `tests/path_a_smoke.rs` |
+| Shell hooks and input ownership | `shell/integration.{bash,zsh,fish}`, `src/pty.rs`, `src/app/pty_output.rs`, `src/osc133.rs`, `src/mode_detect.rs`, `src/terminal_input.rs` | protocol unit tests, `tests/integration_pty.rs`, shell matrix, binary smoke |
 
 - Read [the developer guide](docs/development.md) for the full map, lifecycle invariants, and test selection; follow [release testing](docs/releasing.md) for publication.
 - Inventory with `rg --files src shell tests docs .github`; locate symbols with `rg -n`, then read bounded chunks. Whole-file dumps and combined batch output often exceed tool limits.

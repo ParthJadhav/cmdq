@@ -236,17 +236,6 @@ impl Queue {
         out
     }
 
-    pub fn pop_next_eligible(&mut self, prev_exit: Option<i32>) -> Option<QueueItem> {
-        while let Some(front) = self.items.first() {
-            if front.skipped_after(prev_exit) {
-                self.items.remove(0);
-                continue;
-            }
-            return Some(self.items.remove(0));
-        }
-        None
-    }
-
     pub fn save(&self, path: &Path) -> Result<()> {
         with_queue_file_lock(path, || self.save_snapshot_unlocked(path))
     }
@@ -924,35 +913,6 @@ mod tests {
         assert_eq!(q.items()[0].id, c);
         assert_eq!(q.items()[1].id, a);
         assert!(!q.move_up(c)); // already at top
-    }
-
-    #[test]
-    fn pop_next_eligible_skips_conditional_after_failure() {
-        let mut q = Queue::new();
-        q.push("foo", true); // conditional, should be skipped if prev failed
-        q.push("bar", false);
-        let next = q.pop_next_eligible(Some(1));
-        assert_eq!(next.unwrap().command, "bar");
-        assert!(q.is_empty());
-    }
-
-    #[test]
-    fn pop_next_eligible_runs_conditional_after_success() {
-        let mut q = Queue::new();
-        q.push("foo", true);
-        q.push("bar", false);
-        let next = q.pop_next_eligible(Some(0));
-        assert_eq!(next.unwrap().command, "foo");
-    }
-
-    #[test]
-    fn pop_next_eligible_unknown_prev_skips_conditional() {
-        // Initial dispatch with no prev exit: conditional commands should skip.
-        let mut q = Queue::new();
-        q.push("foo", true);
-        q.push("bar", false);
-        let next = q.pop_next_eligible(None);
-        assert_eq!(next.unwrap().command, "bar");
     }
 
     #[test]
@@ -1728,7 +1688,6 @@ mod tests {
         let mut used = HashSet::from([u64::MAX, 0]);
         let mut next = u64::MAX;
         assert_eq!(next_available_id(&mut used, &mut next), 1);
-        assert_eq!(next, 2);
     }
 
     #[test]

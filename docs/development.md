@@ -9,13 +9,15 @@ queue dispatch and layout.
 | Task | Start with | Relevant coverage |
 | --- | --- | --- |
 | CLI flags and configuration | `src/main.rs::Cli`, `src/config.rs::Config::load` | config unit tests; `tests/binary_smoke.rs` |
-| Main loop and session startup | `src/app.rs::run_with_config_exit_status`, `AppState` | app unit tests; binary smoke |
-| Queue dispatch, conditionals, rollback | app `dispatch_next_eligible`, `src/queue.rs::Queue`, shell integration scripts | `tests/queue_dispatch_e2e.rs`, shell matrix, app/queue unit tests |
-| Session isolation and queue cleanup | queue `new_session_path`, `remove_session_dir`, `sweep_stale_queue_dirs_at`, `src/session_lease.rs` | queue unit tests; binary smoke |
-| Keys, drafts, edit/reorder/delete | `src/input.rs::LineEditor::handle_key`, app `handle_key_with_bytes` | input/app unit tests; shell matrix |
+| Main loop and session startup | `src/app.rs::run_with_config_exit_status`, `AppState` | app unit tests (`src/app/tests.rs`); binary smoke |
+| Queue dispatch, conditionals, rollback | `src/app/lifecycle.rs` (`handle_osc_event`, `dispatch_next_eligible`, `ShellInput`), `src/queue.rs::Queue`, shell integration scripts | shell matrix, app/queue unit tests |
+| Queue file sync and cwd warnings | `src/app/queue_sync.rs`, `src/atomic_file.rs` | app/queue unit tests |
+| Session isolation and queue cleanup | queue `new_session_path`, `remove_session_dir`, `sweep_stale_queue_dirs_at`, `src/session_lease.rs`, `src/app/exit_cleanup.rs` | queue unit tests; binary smoke |
+| Keys, drafts, edit/reorder/delete | `src/input.rs::LineEditor::handle_key`, `src/app/keys.rs`, `src/app/queue_actions.rs`, `src/text_edit.rs` | input/app unit tests; shell matrix |
+| Status messages and panel notices | `src/app/status.rs`, `panel::StatusKind` | panel and app unit tests |
 | Panel strings, clipping, help | panel `paint`, `paint_header`, `paint_hints`, `input_line`, `paint_help` | panel unit tests; binary smoke |
-| Resize and scroll regions | app `desired_layout`, `transition_layout`, `resize_pty_for_layout`; panel `reserve`, `release`; `src/cursor_tracker.rs` | `tests/path_a_smoke.rs`, binary smoke |
-| Child input and terminal protocol routing | `src/terminal_input.rs::Reader`, `src/terminal_input/parse.rs`, `src/mode_detect.rs`, app `refresh_auto_passthrough_for_child_modes` | protocol unit tests; path-A smoke; shell matrix |
+| Resize and scroll regions | `src/app/screen.rs::Screen` (`set_layout`, `resize`), `AppState::desired_layout`; panel `reserve`, `release`; `src/cursor_tracker.rs` | `tests/path_a_smoke.rs`, binary smoke |
+| Child input and terminal protocol routing | `src/terminal_input.rs::Reader`, `src/terminal_input/parse.rs`, `src/mode_detect.rs`, `src/app/pty_output.rs`, lifecycle `refresh_auto_passthrough_for_child_modes`, `src/app/prompt_mirror.rs`, `src/app/output_tail.rs` | protocol unit tests; path-A smoke; shell matrix |
 | Shell hooks and shell startup | `shell/integration.{bash,zsh,fish}`, `src/shell_integration.rs`, `src/pty.rs::ShellPty::spawn`, `src/osc133.rs::Detector` | shell matrix; binary smoke; integration PTY tests |
 | Release/platform changes | [release testing](releasing.md), `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `dist-workspace.toml` | release gates; installer verification script |
 
@@ -53,7 +55,7 @@ generated captures, caches and exports from ordinary Rust exploration.
 | Change | Start with | Broaden when relevant |
 | --- | --- | --- |
 | Pure config/parser/model/render helpers | `cargo test --locked --lib <filter>` | Affected binary/PTY regression |
-| Queue dispatch | `cargo test --locked --test queue_dispatch_e2e` | Required real-shell matrix |
+| Queue dispatch | `cargo test --locked --lib app::` | Required real-shell matrix |
 | Shell hooks, startup, interactive programs | `CMDQ_REQUIRE_SHELL_MATRIX=1 cargo test --locked --release --test shell_matrix` | Binary smoke and release matrix |
 | Scroll regions, resize, terminal replies | `cargo test --locked --test path_a_smoke` | Binary smoke and shell matrix |
 | Binary behavior/lifecycle | `cargo test --locked --test binary_smoke <filter>` | Related module tests |

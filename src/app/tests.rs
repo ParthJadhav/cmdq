@@ -653,17 +653,6 @@ fn empty_queue_with_sigint_does_not_pause() {
 }
 
 #[test]
-fn effective_passthrough_combines_manual_and_auto() {
-    let mut s = make_state();
-    assert!(!s.effective_passthrough());
-    s.manual_passthrough = true;
-    assert!(s.effective_passthrough());
-    s.manual_passthrough = false;
-    s.auto_passthrough = true;
-    assert!(s.effective_passthrough());
-}
-
-#[test]
 fn command_start_clears_stale_prompt_bracketed_paste_mode() {
     let mut s = make_state();
     s.shell_state = ShellState::AtPrompt;
@@ -1376,15 +1365,6 @@ fn truncate_for_status_long_command() {
 #[test]
 fn truncate_for_status_short_command() {
     assert_eq!(truncate_for_status("ls -la"), "ls -la");
-}
-
-#[test]
-fn command_end_clears_long_running_flag() {
-    let mut s = make_state();
-    s.command_started_at = Some(Instant::now() - panel_delay() - Duration::from_millis(50));
-    assert!(s.command_long_running());
-    s.command_started_at = None;
-    assert!(!s.command_long_running());
 }
 
 fn esc_press() -> KeyEvent {
