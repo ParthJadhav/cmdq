@@ -81,12 +81,10 @@ fn unsupported_shell_error(shell: &str) -> anyhow::Error {
     }
 }
 
-/// Determine the user's current shell from $SHELL.
 pub fn current_shell() -> Option<String> {
     std::env::var("SHELL").ok()
 }
 
-/// Path to the rc file we should install into for the given shell.
 fn rc_file_for(shell: ShellKind) -> Option<PathBuf> {
     Some(match shell {
         ShellKind::Zsh => zsh_dot_dir()?.join(".zshrc"),

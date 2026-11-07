@@ -4,8 +4,7 @@
 //! We set `CMDQ_ACTIVE=1` so the shell integration snippet (sourced from rc)
 //! knows to install OSC 133 hooks. We also try to source the snippet directly
 //! for zsh/bash/fish via a temporary rc/init hook so users without integration
-//! in their rc still get markers automatically. (Best-effort; falls back
-//! gracefully.)
+//! in their rc still get markers automatically.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -57,7 +56,6 @@ impl ShellPty {
 
         let mut cmd = CommandBuilder::new(shell_path);
 
-        // Mark this session.
         cmd.env("CMDQ_ACTIVE", "1");
 
         // Force interactive shell so rc files / init hooks are sourced.

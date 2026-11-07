@@ -37,7 +37,6 @@ pub struct QueueItem {
 }
 
 impl QueueItem {
-    /// A chained item is skipped unless the command before it succeeded.
     pub fn skipped_after(&self, prev_exit: Option<i32>) -> bool {
         self.conditional && prev_exit != Some(0)
     }
@@ -237,9 +236,6 @@ impl Queue {
         out
     }
 
-    /// Find next item to dispatch given the previous command's exit code.
-    /// Items with `conditional = true` are skipped (and removed) when
-    /// `prev_exit != Some(0)`. Returns the first item that is allowed to run.
     pub fn pop_next_eligible(&mut self, prev_exit: Option<i32>) -> Option<QueueItem> {
         while let Some(front) = self.items.first() {
             if front.skipped_after(prev_exit) {

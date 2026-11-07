@@ -74,8 +74,6 @@ impl CursorTracker {
         let mut idx = 0;
         while idx < bytes.len() {
             if matches!(self.state, State::Ground) {
-                // Runs of printable ASCII are the bulk of most output; advance
-                // the column arithmetically instead of one byte at a time.
                 let run = bytes[idx..]
                     .iter()
                     .take_while(|&&b| (0x20..=0x7e).contains(&b))
@@ -99,8 +97,6 @@ impl CursorTracker {
             self.col = (col + n) as u16;
             return;
         }
-        // Fill the current line to the deferred-wrap column, then every
-        // further `cols` characters is one wrap that again ends at `cols`.
         let rest = n - (cols - col);
         let full_lines = rest / cols;
         let remainder = rest % cols;

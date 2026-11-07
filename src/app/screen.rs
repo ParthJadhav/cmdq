@@ -134,8 +134,6 @@ impl Screen {
     fn transition(&mut self, desired: PanelLayout) -> Result<()> {
         let (rows, cols) = (self.rows, self.cols);
         let shell_cursor = self.cursor.position();
-        // Always release whatever is currently reserved before applying the new
-        // state — keeps the state machine simple even on resize.
         if let PanelLayout::Reserved { height } = self.layout {
             panel::release(&mut self.out, height, rows)?;
             // Resetting DECSTBM moves the real terminal cursor. Put it back on
@@ -243,11 +241,6 @@ impl Screen {
         let old_reserved = matches!(self.layout, PanelLayout::Reserved { .. });
         let (new_cols, new_rows) = (cols.max(1), rows.max(1));
         let shrinking = new_cols < old_cols || new_rows < old_rows;
-        // The desired panel height may change with the new size; release
-        // first, then the caller recomputes and applies. On shrink, the
-        // terminal has already reflowed panel cells before this event
-        // arrives, so clear their measured new footprint rather than using
-        // stale old-size coordinates.
         if old_reserved && shrinking {
             self.layout = PanelLayout::Hidden;
         } else if old_reserved {
@@ -386,7 +379,6 @@ impl PaintClock {
         }
     }
 
-    /// Invalidate the last paint (layout changed underneath the panel).
     fn force(&mut self) {
         *self = Self::forced();
     }

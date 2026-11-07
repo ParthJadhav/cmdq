@@ -105,11 +105,6 @@ fn notice_rows(view: &PanelState<'_>, height: u16) -> u16 {
     u16::from(height >= 4 && panel_notice(view).is_some())
 }
 
-/// Compute how many rows the panel needs given the current state.
-///
-/// Layout:  header(1) + hints(1) + queue rows + input(1).
-///
-/// When help is open, the panel expands to fill most of the screen.
 pub fn panel_height(view: &PanelState<'_>, total_rows: u16) -> u16 {
     if view.show_help {
         // Leave at least 2 rows of shell visible above so the user keeps
@@ -224,7 +219,6 @@ pub fn reserve(
     // terminals; the explicit MoveTo below pins it back inside the region.
     write!(out, "\x1b[1;{}r", scroll_bottom)?;
     out.queue(MoveTo(0, scroll_bottom.saturating_sub(1)))?;
-    // Clear each panel row so we start from a known blank slate.
     clear_panel_rows(out, panel_height, total_rows)?;
     // clear_panel_rows leaves the cursor in the panel area; restore the
     // shell's logical cursor, adjusted for any rows scrolled above. Keeping
@@ -237,12 +231,7 @@ pub fn reserve(
     out.flush()
 }
 
-/// Reset the scrolling region to the full screen and blank the panel rows,
-/// so the next shell prompt has a clean tail. After return, the cursor sits
-/// on the bottom row of the now-full screen — that's where the inner shell's
-/// SIGWINCH-driven prompt redraw will land, so it shows up at the bottom of
-/// the terminal (where the user expects) rather than at home (1,1) which is
-/// where DECSTBM otherwise parks the cursor.
+/// Blank the panel rows and give the whole screen back to the shell.
 pub fn release(out: &mut impl Write, panel_height: u16, total_rows: u16) -> io::Result<()> {
     if panel_height > 0 && panel_height < total_rows {
         clear_panel_rows(out, panel_height, total_rows)?;
@@ -250,7 +239,8 @@ pub fn release(out: &mut impl Write, panel_height: u16, total_rows: u16) -> io::
     restore_full_screen(out, total_rows)
 }
 
-/// Reset the scrolling region to the full screen without clearing any rows.
+/// Reset the scrolling region to the full screen without clearing any rows,
+/// leaving the cursor on the bottom row.
 pub fn restore_full_screen(out: &mut impl Write, total_rows: u16) -> io::Result<()> {
     reset_scroll_region(out, total_rows)?;
     // CRITICAL: DECSTBM (\x1b[r) moves the cursor to home (1,1) on
@@ -308,9 +298,6 @@ pub fn paint(
         paint_normal(out, view, top, panel_height, total_cols)?;
     }
 
-    // Cursor placement:
-    //  * cursor_in_input → put it where the user is editing.
-    //  * else            → restore the shell cursor by absolute position.
     if cursor_in_input && !view.show_help {
         let input_row = top + panel_height.saturating_sub(1);
         let (_, cursor_col) = input_line(view, total_cols as usize);
@@ -329,7 +316,6 @@ pub fn paint(
     out.flush()
 }
 
-/// Standard panel layout: header / hints / queue rows / input.
 fn paint_normal(
     out: &mut impl Write,
     view: &PanelState<'_>,
@@ -339,9 +325,6 @@ fn paint_normal(
 ) -> io::Result<()> {
     let mut row = top;
 
-    // State lives in the header; actionable feedback has a single notice row.
-    // Queue list. Reserve `panel_height - 3` rows for items (header(1) +
-    // input(1) + hints(1) accounted for).
     let list_capacity = panel_height.saturating_sub(3 + notice_rows(view, panel_height)) as usize;
 
     out.queue(MoveTo(0, row))?;
@@ -714,7 +697,6 @@ fn paint_help(
     panel_height: u16,
     total_cols: u16,
 ) -> io::Result<()> {
-    // Title row.
     out.queue(MoveTo(0, top))?;
     out.queue(Clear(ClearType::CurrentLine))?;
     out.queue(SetForegroundColor(Color::Yellow))?;
@@ -768,7 +750,6 @@ fn paint_help(
             continue;
         }
         if k.is_empty() {
-            // Section note / preamble
             out.queue(SetForegroundColor(Color::Grey))?;
             out.queue(SetAttribute(crossterm::style::Attribute::Italic))?;
             out.queue(Print(clip_to_width(
@@ -780,7 +761,6 @@ fn paint_help(
             continue;
         }
         if d.is_empty() {
-            // Section header
             out.queue(SetForegroundColor(Color::Yellow))?;
             out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
             out.queue(Print(clip_to_width(k, total_cols as usize)))?;

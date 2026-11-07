@@ -70,9 +70,7 @@ impl OutputTail {
 
     fn push(&mut self, c: char) {
         self.text.push(c);
-        // Only ASCII ever lands here, so bytes == chars. Trim in bulk once the
-        // buffer has doubled instead of rescanning the tail on every byte;
-        // that rescan used to dominate cmdq's per-byte output cost.
+        // `feed` only pushes ASCII, so this byte offset is a char boundary.
         if self.text.len() > Self::MAX_TAIL_CHARS * 2 {
             let drain_to = self.text.len() - Self::MAX_TAIL_CHARS;
             self.text.drain(..drain_to);

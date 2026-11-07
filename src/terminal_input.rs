@@ -281,7 +281,6 @@ fn token_length(bytes: &[u8]) -> Option<usize> {
                     return Some(index + 1);
                 }
             }
-            // Bound malformed/unterminated reply buffers.
             (bytes.len() >= 1024 * 1024).then_some(bytes.len())
         }
         0x1b => Some(1),

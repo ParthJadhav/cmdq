@@ -67,7 +67,6 @@ pub(super) fn handle_key(
         state.resume_cwd_confirmation_started_at = None;
     }
 
-    // Anything but a second Ctrl-K withdraws a pending queue clear.
     if state.pending_clear_at.is_some() && !is_ctrl_k(&key) {
         withdraw_pending_clear(state);
     }
@@ -108,7 +107,6 @@ pub(super) fn handle_key(
         }
     }
 
-    // Double-Esc toggles passthrough — SSH-safe alternative to Ctrl-\.
     let esc_clears_editor = state.editor_owns_input()
         && (!state.editor.buffer.is_empty() || state.editor.editing_index.is_some());
     if matches!(key.code, KeyCode::Esc)
@@ -136,7 +134,6 @@ pub(super) fn handle_key(
             // mode without leaking the first byte into the running app.
             return KeyOutcome::Continue;
         }
-        // fall through so the first Esc behaves normally
     } else if state.last_esc_at.is_some() {
         if !state.editor_owns_input() {
             shell.send(b"\x1b");
@@ -197,11 +194,6 @@ pub(super) fn handle_key(
         return KeyOutcome::Continue;
     }
 
-    // Ctrl-D quit flow:
-    //   - empty buffer + no edit: quit, but require a second press within
-    //     QUIT_CONFIRM_WINDOW if the queue still has items.
-    //   - the editor binds Ctrl-D to DeleteEdited only, so we have to handle
-    //     the quit case here.
     if ctrl
         && matches!(key.code, KeyCode::Char('d' | 'D'))
         && editor_owns
@@ -226,7 +218,6 @@ pub(super) fn handle_key(
         return KeyOutcome::Continue;
     }
 
-    // Any other key cancels a pending quit confirmation.
     if state.pending_quit_at.is_some() {
         state.pending_quit_at = None;
     }

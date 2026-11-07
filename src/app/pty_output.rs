@@ -90,7 +90,10 @@ fn signal_output_wakeup(tx: &Option<OutputWakeup>, armed: &AtomicBool) {
 }
 
 /// The marker and mode detectors that watch shell output, plus the tail of a
-/// mode sequence split across reads.
+/// mode sequence split across reads. That tail is held until it completes
+/// (or the shell exits), never timed out: programs and network links can
+/// pause anywhere inside a sequence, and a panel repaint written in the gap
+/// would splice into it.
 pub(super) struct OutputSniffer {
     osc: osc133::Detector,
     mode: mode_detect::Detector,

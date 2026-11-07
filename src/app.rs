@@ -125,7 +125,6 @@ struct AppState {
     force_queue: bool,
     show_help: bool,
     terminal_allows_panel: bool,
-    /// Last time we forwarded SIGINT (0x03) to the inner shell.
     last_sigint_at: Option<Instant>,
     command_started_at: Option<Instant>,
     command_tty_check_after: Option<Instant>,
@@ -237,8 +236,6 @@ impl AppState {
             .is_some_and(|t| t.elapsed() <= CLEAR_CONFIRM_WINDOW)
     }
 
-    /// The user has typed (or is editing) something in the queue input that
-    /// has not been committed yet.
     fn draft_pending(&self) -> bool {
         self.editor.editing_index.is_some() || !self.editor.buffer.is_empty()
     }
@@ -288,7 +285,6 @@ impl AppState {
         }
     }
 
-    /// The running program's terminal modes end with it.
     fn reset_child_modes(&mut self) {
         self.child = ChildModes::default();
         self.auto_passthrough = false;
@@ -540,11 +536,6 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
         }
         let _ = screen.out.flush();
 
-        // An unfinished escape sequence has no printable content. Keep it
-        // buffered until complete (or child exit): timing it out lets a later
-        // cursor move or panel repaint splice bytes into the child's sequence.
-        // Slow programs, network links, and busy runners can pause arbitrarily
-        // between fragments of the same terminal control sequence.
         state.tick_status();
         flush_pending_escape_if_due(
             &mut state,
@@ -553,17 +544,12 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
 
         if let Some(status) = screen.pty.try_wait().context("wait for shell")? {
             sniffer.flush_pending(&mut state, &mut screen)?;
-            // Tear down our reservation before exiting so the user's
-            // terminal returns to a clean state.
             let _ = screen.hide_panel();
             break Ok(status.exit_code());
         }
 
         state.apply_desired_layout(&mut screen)?;
 
-        // PTY output wakes the poll through a pipe, so idle iterations can
-        // sleep longer; keep the short timeout only while a partial key
-        // sequence or a deferred repaint is pending.
         #[cfg(unix)]
         let input_pending = terminal_input.has_pending_input();
         #[cfg(not(unix))]
@@ -597,9 +583,6 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
             None
         };
         if let Some(event) = event {
-            // A reader can restore canonical mode while poll waits for the
-            // next key. Route against the current discipline, not the state
-            // sampled before the last output batch.
             refresh_tty_input(&mut state, &mut screen)?;
             match event {
                 CtEvent::Resize(cols, rows) => handle_resize(&mut state, &mut screen, cols, rows)?,
@@ -662,10 +645,6 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
             }
         }
 
-        // Repaint the panel when what it shows has changed. Output counts as
-        // a change: it leaves the terminal cursor away from the panel's input
-        // line. Rate-limited so a flood of output cannot turn into a flood of
-        // repaints.
         paint_pending = screen.paint_panel(
             &state.panel_view(),
             state.editor_owns_input(),

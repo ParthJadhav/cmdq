@@ -13,34 +13,24 @@ pub enum InputAction {
     Nothing,
     CompletionUnavailable,
     FinishEditFirst,
-    /// Forward these raw bytes to the PTY (ie. send to the running child).
     ForwardToChild(Vec<u8>),
-    /// Enqueue a new command (committed from the input buffer).
     EnqueueCurrent {
         command: String,
         conditional: bool,
     },
-    /// Commit an edit on the queue item at the given index.
     CommitEdit {
         index: usize,
         command: String,
         conditional: bool,
     },
-    /// Cancel the current edit (without removing the item).
     CancelEdit,
-    /// Remove the item being edited.
     DeleteEdited,
-    /// Move the edited item up by one position.
     MoveEditedUp,
-    /// Move the edited item down by one position.
     MoveEditedDown,
-    /// Toggle the queue paused/running state.
     TogglePause,
-    /// Clear the entire queue.
     ClearQueue,
     /// Toggle "force queue mode" (capture even at prompt).
     ToggleForceQueue,
-    /// Show the help overlay.
     ToggleHelp,
     /// Toggle the chain ("conditional") flag on the in-progress draft/edit.
     /// `now_on` is the new state of the flag after the toggle.
@@ -55,7 +45,6 @@ pub struct LineEditor {
     pub cursor: usize,
     /// If Some, we are editing the queue item at this index; Enter commits.
     pub editing_index: Option<usize>,
-    /// Conditional flag for the in-progress draft / edit.
     pub conditional: bool,
     saved_draft: Option<(String, usize, bool)>,
 }
@@ -126,8 +115,6 @@ impl LineEditor {
         self.cursor = text_edit::next_word_end(&self.buffer, self.cursor);
     }
 
-    /// Translate a key event into an InputAction. `queue` is consulted only
-    /// for navigation (Up/Down) — does not mutate it.
     pub fn handle_key(&mut self, key: KeyEvent, queue: &Queue) -> InputAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);

@@ -79,7 +79,6 @@ impl Detector {
         }
     }
 
-    /// Feed a chunk of bytes. Returns events detected within them.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
         self.feed_with_offsets(bytes)
             .into_iter()
@@ -95,8 +94,6 @@ impl Detector {
         let mut idx = 0;
         while idx < bytes.len() {
             if matches!(self.state, State::Normal) {
-                // Plain text is the common case: jump straight to the next
-                // escape instead of stepping the state machine per byte.
                 match bytes[idx..].iter().position(|&b| b == ESC) {
                     Some(offset) => idx += offset,
                     None => break,
