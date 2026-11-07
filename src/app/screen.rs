@@ -47,17 +47,15 @@ pub(super) enum PanelLayout {
 pub(super) struct TerminalRestoreState {
     layout: PanelLayout,
     rows: u16,
-    cols: u16,
     alt_screen: bool,
 }
 
 pub(super) type SharedRestoreState = Arc<Mutex<TerminalRestoreState>>;
 
-pub(super) fn shared_restore_state(cols: u16, rows: u16) -> SharedRestoreState {
+pub(super) fn shared_restore_state(rows: u16) -> SharedRestoreState {
     Arc::new(Mutex::new(TerminalRestoreState {
         layout: PanelLayout::Hidden,
         rows,
-        cols,
         alt_screen: false,
     }))
 }
@@ -137,7 +135,7 @@ impl Screen {
         // Always release whatever is currently reserved before applying the new
         // state — keeps the state machine simple even on resize.
         if let PanelLayout::Reserved { height } = self.layout {
-            panel::release(&mut self.out, height, rows, cols)?;
+            panel::release(&mut self.out, height, rows)?;
             // Resetting DECSTBM moves the real terminal cursor. Put it back on
             // the shell cursor that we tracked from PTY output before resizing
             // the child; otherwise a SIGWINCH prompt redraw can leave an orphan
@@ -185,7 +183,6 @@ impl Screen {
         if let Ok(mut restore) = self.restore.lock() {
             restore.layout = self.layout;
             restore.rows = self.rows;
-            restore.cols = self.cols;
         }
     }
 
@@ -237,7 +234,7 @@ impl Screen {
         self.rows = new_rows;
         self.record_layout();
         if old_reserved {
-            panel::release(&mut self.out, 0, new_rows, new_cols)?;
+            panel::restore_full_screen(&mut self.out, new_rows)?;
             if shrinking {
                 let (col, row) = clear_reflowed_panel_after_shrink(
                     &mut self.out,
@@ -255,7 +252,7 @@ impl Screen {
         if new_rows > old_rows
             && let Some(reflow_rows) = self.deferred_panel_reflow_rows.take()
         {
-            panel::release(&mut self.out, 0, new_rows, new_cols)?;
+            panel::restore_full_screen(&mut self.out, new_rows)?;
             clear_reappeared_panel_rows(&mut self.out, reflow_rows, old_rows, new_rows)?;
             let (col, row) = self.cursor.position();
             self.cursor.set_size(new_cols, new_rows);
@@ -480,7 +477,6 @@ pub(super) fn restore_terminal(state: &SharedRestoreState) -> Result<()> {
         rows: crossterm::terminal::size()
             .map(|(_, rows)| rows.max(1))
             .unwrap_or(24),
-        cols: 80,
         alt_screen: false,
     });
     let _ = restore_terminal_display(&mut stdout, restore);
@@ -492,23 +488,14 @@ pub(super) fn restore_terminal(state: &SharedRestoreState) -> Result<()> {
 
 fn restore_terminal_display(out: &mut impl Write, state: TerminalRestoreState) -> io::Result<()> {
     let rows = state.rows.max(1);
-    let cols = state.cols.max(1);
     if state.alt_screen {
         write!(out, "{ALT_SCREEN_EXIT}")?;
     }
-    match state.layout {
-        PanelLayout::Reserved { height } if height > 0 && height < rows => {
-            panel::release(out, height, rows, cols)?;
-        }
-        _ => {
-            // Reset scrolling region and put the cursor at the normal shell
-            // prompt location even if no panel was reserved.
-            write!(out, "\x1b[1;{}r", rows)?;
-            out.queue(MoveTo(0, rows.saturating_sub(1)))?;
-            out.flush()?;
-        }
-    }
-    Ok(())
+    let height = match state.layout {
+        PanelLayout::Reserved { height } => height,
+        PanelLayout::Hidden => 0,
+    };
+    panel::release(out, height, rows)
 }
 
 #[cfg(test)]
@@ -523,7 +510,6 @@ mod tests {
             TerminalRestoreState {
                 layout: PanelLayout::Reserved { height: 3 },
                 rows: 10,
-                cols: 40,
                 alt_screen: false,
             },
         )
@@ -550,7 +536,6 @@ mod tests {
             TerminalRestoreState {
                 layout: PanelLayout::Hidden,
                 rows: 10,
-                cols: 40,
                 alt_screen: true,
             },
         )

@@ -225,7 +225,7 @@ pub fn reserve(
     write!(out, "\x1b[1;{}r", scroll_bottom)?;
     out.queue(MoveTo(0, scroll_bottom.saturating_sub(1)))?;
     // Clear each panel row so we start from a known blank slate.
-    clear_panel_rows(out, panel_height, total_rows, total_cols)?;
+    clear_panel_rows(out, panel_height, total_rows)?;
     // clear_panel_rows leaves the cursor in the panel area; restore the
     // shell's logical cursor, adjusted for any rows scrolled above. Keeping
     // its original row avoids a large blank jump when the panel first opens
@@ -243,15 +243,15 @@ pub fn reserve(
 /// SIGWINCH-driven prompt redraw will land, so it shows up at the bottom of
 /// the terminal (where the user expects) rather than at home (1,1) which is
 /// where DECSTBM otherwise parks the cursor.
-pub fn release(
-    out: &mut impl Write,
-    panel_height: u16,
-    total_rows: u16,
-    total_cols: u16,
-) -> io::Result<()> {
+pub fn release(out: &mut impl Write, panel_height: u16, total_rows: u16) -> io::Result<()> {
     if panel_height > 0 && panel_height < total_rows {
-        clear_panel_rows(out, panel_height, total_rows, total_cols)?;
+        clear_panel_rows(out, panel_height, total_rows)?;
     }
+    restore_full_screen(out, total_rows)
+}
+
+/// Reset the scrolling region to the full screen without clearing any rows.
+pub fn restore_full_screen(out: &mut impl Write, total_rows: u16) -> io::Result<()> {
     reset_scroll_region(out, total_rows)?;
     // CRITICAL: DECSTBM (\x1b[r) moves the cursor to home (1,1) on
     // xterm-class terminals (incl. tmux). If we leave the cursor there, the
@@ -272,12 +272,7 @@ fn reset_scroll_region(out: &mut impl Write, total_rows: u16) -> io::Result<()> 
     Ok(())
 }
 
-fn clear_panel_rows(
-    out: &mut impl Write,
-    panel_height: u16,
-    total_rows: u16,
-    _total_cols: u16,
-) -> io::Result<()> {
+fn clear_panel_rows(out: &mut impl Write, panel_height: u16, total_rows: u16) -> io::Result<()> {
     let top = total_rows - panel_height;
     for row in 0..panel_height {
         out.queue(MoveTo(0, top + row))?;
@@ -308,7 +303,7 @@ pub fn paint(
     out.queue(Hide)?;
 
     if view.show_help {
-        paint_help(out, view, top, panel_height, total_cols)?;
+        paint_help(out, top, panel_height, total_cols)?;
     } else {
         paint_normal(out, view, top, panel_height, total_cols)?;
     }
@@ -479,10 +474,7 @@ fn paint_header(
     let mut header = format!(" {state} ");
     if let Some((first, last, total)) = queue_overflow(view, list_capacity) {
         if first > 1 {
-            header.push_str(&format!("{first}–{last} of {total}"));
-            if first > 1 {
-                header.push_str(" ↑");
-            }
+            header.push_str(&format!("{first}–{last} of {total} ↑"));
             if last < total {
                 header.push_str(" ↓");
             }
@@ -718,7 +710,6 @@ fn input_line(view: &PanelState<'_>, cols: usize) -> (String, usize) {
 /// occupies most of the screen so we have room for everything.
 fn paint_help(
     out: &mut impl Write,
-    _view: &PanelState<'_>,
     top: u16,
     panel_height: u16,
     total_cols: u16,

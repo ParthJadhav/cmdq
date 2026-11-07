@@ -415,7 +415,7 @@ pub fn run_with_config_exit_status(cfg: AppConfig, config: Config) -> Result<u32
     let pty_output = pty_output::spawn_reader(io_pair.reader);
     let mut shell_writer: Box<dyn Write + Send> = io_pair.writer;
 
-    let restore_state = shared_restore_state(cols, rows);
+    let restore_state = shared_restore_state(rows);
     enable_raw_mode().context("enable_raw_mode")?;
     let _terminal_guard = TerminalGuard::install(restore_state.clone());
     let queued_count = Arc::new(AtomicUsize::new(queue.len()));
