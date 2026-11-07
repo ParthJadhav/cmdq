@@ -4,6 +4,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::queue::Queue;
+use crate::text_edit;
 
 /// What the app should do in response to a key, while the queue panel owns
 /// keystrokes.
@@ -93,136 +94,37 @@ impl LineEditor {
         self.conditional = conditional;
     }
 
-    fn prev_boundary(&self) -> usize {
-        self.buffer[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self) -> usize {
-        self.buffer[self.cursor..]
-            .char_indices()
-            .nth(1)
-            .map(|(i, _)| self.cursor + i)
-            .unwrap_or(self.buffer.len())
-    }
-
     fn insert_char(&mut self, c: char) {
-        self.buffer.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        let mut buf = [0u8; 4];
+        text_edit::insert_str(&mut self.buffer, &mut self.cursor, c.encode_utf8(&mut buf));
     }
 
     pub fn insert_str(&mut self, s: &str) {
-        self.buffer.insert_str(self.cursor, s);
-        self.cursor += s.len();
+        text_edit::insert_str(&mut self.buffer, &mut self.cursor, s);
     }
 
     fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = self.prev_boundary();
-        self.buffer.replace_range(prev..self.cursor, "");
-        self.cursor = prev;
+        text_edit::backspace(&mut self.buffer, &mut self.cursor);
     }
 
     fn delete_at_cursor(&mut self) {
-        if self.cursor >= self.buffer.len() {
-            return;
-        }
-        let next = self.next_boundary();
-        self.buffer.replace_range(self.cursor..next, "");
-    }
-
-    fn delete_previous_word(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let start = self.previous_word_start();
-        self.buffer.replace_range(start..self.cursor, "");
-        self.cursor = start;
-    }
-
-    fn previous_word_start(&self) -> usize {
-        let mut start = self.cursor;
-        while start > 0 {
-            let prev = self.buffer[..start]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let ch = self.buffer[prev..start].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            start = prev;
-        }
-        while start > 0 {
-            let prev = self.buffer[..start]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let ch = self.buffer[prev..start].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            start = prev;
-        }
-        start
-    }
-
-    fn next_word_end(&self) -> usize {
-        let mut end = self.cursor;
-        while end < self.buffer.len() {
-            let next = self.buffer[end..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| end + i)
-                .unwrap_or(self.buffer.len());
-            let ch = self.buffer[end..next].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            end = next;
-        }
-        while end < self.buffer.len() {
-            let next = self.buffer[end..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| end + i)
-                .unwrap_or(self.buffer.len());
-            let ch = self.buffer[end..next].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            end = next;
-        }
-        end
+        text_edit::delete_at_cursor(&mut self.buffer, self.cursor);
     }
 
     fn move_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        self.cursor = self.prev_boundary();
+        self.cursor = text_edit::prev_boundary(&self.buffer, self.cursor);
     }
 
     fn move_right(&mut self) {
-        if self.cursor >= self.buffer.len() {
-            return;
-        }
-        self.cursor = self.next_boundary();
+        self.cursor = text_edit::next_boundary(&self.buffer, self.cursor);
     }
 
     fn move_word_left(&mut self) {
-        self.cursor = self.previous_word_start();
+        self.cursor = text_edit::previous_word_start(&self.buffer, self.cursor);
     }
 
     fn move_word_right(&mut self) {
-        self.cursor = self.next_word_end();
+        self.cursor = text_edit::next_word_end(&self.buffer, self.cursor);
     }
 
     /// Translate a key event into an InputAction. `queue` is consulted only
@@ -278,13 +180,11 @@ impl LineEditor {
                     InputAction::Nothing
                 }
                 'u' | 'U' => {
-                    // Kill back-to-start.
-                    self.buffer.replace_range(..self.cursor, "");
-                    self.cursor = 0;
+                    text_edit::kill_to_start(&mut self.buffer, &mut self.cursor);
                     InputAction::Nothing
                 }
                 'w' | 'W' => {
-                    self.delete_previous_word();
+                    text_edit::delete_previous_word(&mut self.buffer, &mut self.cursor);
                     InputAction::Nothing
                 }
                 _ => InputAction::Nothing,

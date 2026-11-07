@@ -15,3 +15,4 @@ pub mod session_lease;
 pub mod shell_integration;
 #[cfg(unix)]
 mod terminal_input;
+mod text_edit;
