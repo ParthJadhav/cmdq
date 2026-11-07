@@ -1,15 +1,48 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file::{self, Access};
+
+/// How often a running session rewrites its lease.
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// A lease older than this belongs to a session that is gone.
 const LEASE_TTL: Duration = Duration::from_secs(5);
+const _: () = assert!(LEASE_TTL.as_millis() > 2 * REFRESH_INTERVAL.as_millis());
+const LEASE_FILE_PREFIX: &str = "session-";
+const LEASE_FILE_SUFFIX: &str = ".json";
 
 #[derive(Debug)]
 pub struct SessionLease {
     path: PathBuf,
     record: LeaseRecord,
+    /// Serializes refreshes against removal from a signal-handling thread.
+    io: Arc<Mutex<()>>,
+}
+
+/// Removes a lease's file from another thread when the process is about to
+/// exit, without racing a refresh that would recreate it.
+#[derive(Debug)]
+pub struct LeaseRemover {
+    path: PathBuf,
+    io: Arc<Mutex<()>>,
+}
+
+impl LeaseRemover {
+    /// Remove the lease file and block further refreshes until the process
+    /// exits.
+    pub fn remove_for_exit(self) {
+        let guard = lock(&self.io);
+        let _ = std::fs::remove_file(&self.path);
+        std::mem::forget(guard);
+    }
+}
+
+fn lock(io: &Mutex<()>) -> MutexGuard<'_, ()> {
+    io.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,9 +59,9 @@ impl SessionLease {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating session lease dir {}", dir.display()))?;
         let path = dir.join(format!(
-            "session-{}-{}.json",
+            "{LEASE_FILE_PREFIX}{}-{}{LEASE_FILE_SUFFIX}",
             std::process::id(),
-            monotonic_suffix()
+            atomic_file::unique_suffix()
         ));
         let mut lease = Self {
             path,
@@ -38,18 +71,23 @@ impl SessionLease {
                 cwd: cwd.map(Path::to_path_buf),
                 updated_at_millis: now_millis(),
             },
+            io: Arc::default(),
         };
         lease.refresh()?;
         Ok(lease)
     }
 
     pub fn refresh(&mut self) -> Result<()> {
+        let _io = lock(&self.io);
         self.record.updated_at_millis = now_millis();
         write_record_atomic(&self.path, &self.record)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn remover(&self) -> LeaseRemover {
+        LeaseRemover {
+            path: self.path.clone(),
+            io: self.io.clone(),
+        }
     }
 }
 
@@ -68,6 +106,17 @@ pub fn active_peer_count(queue_path: &Path) -> Result<usize> {
     let mut count = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
+        // Skip other sessions' in-flight temp files: they hold a complete
+        // record too, so reading them would count a session twice.
+        let is_lease = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with(LEASE_FILE_PREFIX) && name.ends_with(LEASE_FILE_SUFFIX)
+            });
+        if !is_lease {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
@@ -94,38 +143,13 @@ fn lease_dir(queue_path: &Path) -> Result<PathBuf> {
 }
 
 fn write_record_atomic(path: &Path, record: &LeaseRecord) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating session lease dir {}", parent.display()))?;
-    }
-    let tmp = path.with_file_name(format!(
-        ".{}.tmp-{}-{}",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("lease"),
-        std::process::id(),
-        monotonic_suffix()
-    ));
-    let data = serde_json::to_vec(record)?;
-    std::fs::write(&tmp, data).with_context(|| format!("writing {}", tmp.display()))?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))
-        }
-    }
+    atomic_file::write(path, &serde_json::to_vec(record)?, Access::Inherit)
 }
 
 fn now_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-fn monotonic_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
         .unwrap_or(0)
 }
 

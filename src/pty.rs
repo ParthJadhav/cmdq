@@ -4,23 +4,20 @@
 //! We set `CMDQ_ACTIVE=1` so the shell integration snippet (sourced from rc)
 //! knows to install OSC 133 hooks. We also try to source the snippet directly
 //! for zsh/bash/fish via a temporary rc/init hook so users without integration
-//! in their rc still get markers automatically. (Best-effort; falls back
-//! gracefully.)
+//! in their rc still get markers automatically.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
+use crate::atomic_file::{self, Access};
 use crate::shell_integration::{
-    ShellKind, data_dir, shell_single_quote, write_file_atomic, write_integration_script,
-    zsh_dot_dir,
+    ShellKind, shell_single_quote, write_integration_script, zsh_dot_dir,
 };
 
-static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const STALE_SESSION_DIR_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct ShellPty {
@@ -35,8 +32,8 @@ pub struct PtyIo {
 }
 
 impl ShellPty {
-    /// Spawn the configured shell. Returns the pty + io handles.
-    pub fn spawn(shell: Option<&str>, cols: u16, rows: u16) -> Result<(Self, PtyIo)> {
+    /// Spawn `shell_path` with cmdq's integration. Returns the pty + io handles.
+    pub fn spawn(shell_path: &str, kind: ShellKind, cols: u16, rows: u16) -> Result<(Self, PtyIo)> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -47,12 +44,6 @@ impl ShellPty {
             })
             .context("openpty failed")?;
 
-        let shell_path = shell
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/sh".to_string());
-        let kind = ShellKind::detect_from_path(&shell_path);
-
         // A supported shell must have working hooks; silently falling back
         // leaves a queue that accepts commands but never dispatches them.
         let integration_script = match kind {
@@ -61,9 +52,8 @@ impl ShellPty {
         };
         let mut session_dirs = Vec::new();
 
-        let mut cmd = CommandBuilder::new(&shell_path);
+        let mut cmd = CommandBuilder::new(shell_path);
 
-        // Mark this session.
         cmd.env("CMDQ_ACTIVE", "1");
 
         // Force interactive shell so rc files / init hooks are sourced.
@@ -193,11 +183,11 @@ impl Drop for ShellPty {
 /// Build a temporary bash rcfile that sources the user's real ~/.bashrc and
 /// then cmdq's integration script. Interactive bash ignores BASH_ENV, so
 /// --rcfile is the only reliable way to make clean bash sessions emit markers.
-fn prepare_bash_rcfile(script: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
+fn prepare_bash_rcfile(script: &Path) -> Result<(PathBuf, PathBuf)> {
     let session_dir = prepare_session_dir("bash")?;
     let rcfile = session_dir.join("bashrc");
 
-    let real_home = dirs::home_dir()?;
+    let real_home = dirs::home_dir().context("no home directory")?;
     let real_bashrc_q = shell_single_quote(&real_home.join(".bashrc"));
     let real_bash_profile_q = shell_single_quote(&real_home.join(".bash_profile"));
     let real_bash_login_q = shell_single_quote(&real_home.join(".bash_login"));
@@ -206,17 +196,17 @@ fn prepare_bash_rcfile(script: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
     let content = format!(
         "if [ -f {real_bashrc_q} ]; then\n  . {real_bashrc_q}\nelif [ -f {real_bash_profile_q} ]; then\n  . {real_bash_profile_q}\nelif [ -f {real_bash_login_q} ]; then\n  . {real_bash_login_q}\nelif [ -f {real_profile_q} ]; then\n  . {real_profile_q}\nfi\n[ -f {script_q} ] && . {script_q}\n"
     );
-    write_file_atomic(&rcfile, content.as_bytes()).ok()?;
-    Some((rcfile, session_dir))
+    atomic_file::write(&rcfile, content.as_bytes(), Access::Inherit)?;
+    Ok((rcfile, session_dir))
 }
 
 /// Build a temporary ZDOTDIR that sources the user's real zsh startup files and then
 /// our integration script. This means cmdq users get OSC 133 even without
 /// running `--install-integration`.
-fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
+fn prepare_zdotdir(script: &Path) -> Result<PathBuf> {
     let zdotdir = prepare_session_dir("zsh")?;
 
-    let real_zdotdir = zsh_dot_dir()?;
+    let real_zdotdir = zsh_dot_dir().context("no home directory")?;
     let real_zshenv = real_zdotdir.join(".zshenv");
 
     let zdotdir_q = shell_single_quote(&zdotdir);
@@ -232,13 +222,13 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
          export _CMDQ_SYNTHETIC_ZDOTDIR _CMDQ_USER_ZDOTDIR\n\
          export ZDOTDIR=\"$_CMDQ_SYNTHETIC_ZDOTDIR\"\n"
     );
-    write_file_atomic(&zdotdir.join(".zshenv"), zshenv.as_bytes()).ok()?;
+    atomic_file::write(&zdotdir.join(".zshenv"), zshenv.as_bytes(), Access::Inherit)?;
 
     // Source the user's file at top level, never from inside a function:
     // `typeset -U path PATH` or `typeset -U fpath` at the top of a zshrc
     // would otherwise become function-local and vanish (taking every
     // autoloadable function, including add-zsh-hook, with it).
-    let mk = |dest: &Path, file: &str, also_source_integration: bool| -> Option<()> {
+    let mk = |dest: &Path, file: &str, also_source_integration: bool| -> Result<()> {
         let mut content = format!(
             "if [[ -n \"${{_CMDQ_USER_ZDOTDIR:-}}\" && -f \"$_CMDQ_USER_ZDOTDIR/{file}\" ]]; then\n\
              \x20 _cmdq_saved_zdotdir=\"${{ZDOTDIR:-}}\"\n\
@@ -252,7 +242,7 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
             let script_q = shell_single_quote(script);
             content.push_str(&format!("[ -f {script_q} ] && source {script_q}\n"));
         }
-        write_file_atomic(dest, content.as_bytes()).ok()
+        atomic_file::write(dest, content.as_bytes(), Access::Inherit)
     };
 
     mk(&zdotdir.join(".zprofile"), ".zprofile", false)?;
@@ -260,31 +250,21 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
     mk(&zdotdir.join(".zshrc"), ".zshrc", true)?;
     mk(&zdotdir.join(".zlogin"), ".zlogin", false)?;
 
-    Some(zdotdir)
+    Ok(zdotdir)
 }
 
-fn prepare_session_dir(prefix: &str) -> Option<PathBuf> {
-    let base = data_dir().ok()?.join("cmdq").join("sessions");
-    std::fs::create_dir_all(&base).ok()?;
+fn prepare_session_dir(prefix: &str) -> Result<PathBuf> {
+    let base = crate::paths::data_dir()
+        .context("could not locate home/data dir")?
+        .join("cmdq")
+        .join("sessions");
+    std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
     cleanup_stale_session_dirs(&base);
-    for attempt in 0..100 {
-        let dir = base.join(format!(
-            "{prefix}-{}-{}-{}",
-            std::process::id(),
-            monotonic_session_suffix(),
-            attempt
-        ));
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return Some(dir),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return None,
-        }
-    }
-    None
+    atomic_file::create_unique_dir(&base, &format!("{prefix}-"))
 }
 
 fn cleanup_stale_session_dirs(base: &Path) {
-    cleanup_stale_session_dirs_at(base, unix_nanos());
+    cleanup_stale_session_dirs_at(base, atomic_file::unix_nanos());
 }
 
 fn cleanup_stale_session_dirs_at(base: &Path, now_nanos: u128) {
@@ -317,19 +297,7 @@ fn session_dir_created_nanos(name: &str) -> Option<u128> {
     let _attempt = parts.next()?;
     let suffix = parts.next()?.parse::<u128>().ok()?;
     let _prefix_and_pid = parts.next()?;
-    Some(suffix / 1000)
-}
-
-fn monotonic_session_suffix() -> u128 {
-    let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    unix_nanos().saturating_mul(1000) + u128::from(counter)
-}
-
-fn unix_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+    Some(atomic_file::unique_suffix_nanos(suffix))
 }
 
 #[cfg(test)]

@@ -34,6 +34,23 @@ use crate::queue::Queue;
 /// what fits above the bottom edge.
 const HELP_MAX_ROWS: u16 = 29;
 
+/// What a status message is, so the panel can decide whether it needs its
+/// own notice row without parsing the wording.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum StatusKind {
+    /// Actionable feedback: shown on its own row.
+    #[default]
+    Notice,
+    /// Confirms a routine action the queue or header already shows.
+    Routine,
+    /// An outcome that `activity` also records; the activity line wins.
+    Outcome,
+    /// The queue was paused; the header already says so.
+    Paused,
+    /// Asks for a confirming second key press.
+    Confirmation,
+}
+
 /// Snapshot of the cmdq state the panel needs to render itself. Borrowed
 /// per-frame; no allocation in the hot path beyond what crossterm does.
 pub struct PanelState<'a> {
@@ -50,6 +67,7 @@ pub struct PanelState<'a> {
     pub activity: Option<&'a str>,
     pub can_recover: bool,
     pub status: &'a str,
+    pub status_kind: StatusKind,
     pub pending_quit: bool,
     pub pending_clear: bool,
     pub show_help: bool,
@@ -64,33 +82,19 @@ fn panel_notice<'a>(view: &'a PanelState<'_>) -> Option<&'a str> {
         && !view.passthrough_to_child
         && !view.child_input_prompt
         && view.editing_index.is_none()
-        && matches!(
-            view.status,
-            "queue paused" | "queue paused by another session"
-        )
+        && view.status_kind == StatusKind::Paused
     {
         return view.activity;
     }
     if view.pending_clear || view.pending_quit {
         return None;
     }
-    let routine = [
-        "added:",
-        "saved:",
-        "dispatched:",
-        "queue resumed",
-        "Building queue",
-        "Typing into",
-        "alt-screen",
-        "mouse tracking",
-        "edit cancelled",
-    ]
-    .iter()
-    .any(|prefix| view.status.starts_with(prefix));
-    let outcome_in_activity = view.activity.is_some()
-        && (view.status.starts_with("removed:")
-            || matches!(view.status, "queue cleared" | "restored to paused queue"));
-    if !view.status.is_empty() && !routine && !outcome_in_activity {
+    let explained = match view.status_kind {
+        StatusKind::Routine => true,
+        StatusKind::Outcome => view.activity.is_some(),
+        StatusKind::Notice | StatusKind::Paused | StatusKind::Confirmation => false,
+    };
+    if !view.status.is_empty() && !explained {
         Some(view.status)
     } else {
         view.activity
@@ -101,11 +105,6 @@ fn notice_rows(view: &PanelState<'_>, height: u16) -> u16 {
     u16::from(height >= 4 && panel_notice(view).is_some())
 }
 
-/// Compute how many rows the panel needs given the current state.
-///
-/// Layout:  header(1) + hints(1) + queue rows + input(1).
-///
-/// When help is open, the panel expands to fill most of the screen.
 pub fn panel_height(view: &PanelState<'_>, total_rows: u16) -> u16 {
     if view.show_help {
         // Leave at least 2 rows of shell visible above so the user keeps
@@ -220,8 +219,7 @@ pub fn reserve(
     // terminals; the explicit MoveTo below pins it back inside the region.
     write!(out, "\x1b[1;{}r", scroll_bottom)?;
     out.queue(MoveTo(0, scroll_bottom.saturating_sub(1)))?;
-    // Clear each panel row so we start from a known blank slate.
-    clear_panel_rows(out, panel_height, total_rows, total_cols)?;
+    clear_panel_rows(out, panel_height, total_rows)?;
     // clear_panel_rows leaves the cursor in the panel area; restore the
     // shell's logical cursor, adjusted for any rows scrolled above. Keeping
     // its original row avoids a large blank jump when the panel first opens
@@ -233,21 +231,17 @@ pub fn reserve(
     out.flush()
 }
 
-/// Reset the scrolling region to the full screen and blank the panel rows,
-/// so the next shell prompt has a clean tail. After return, the cursor sits
-/// on the bottom row of the now-full screen — that's where the inner shell's
-/// SIGWINCH-driven prompt redraw will land, so it shows up at the bottom of
-/// the terminal (where the user expects) rather than at home (1,1) which is
-/// where DECSTBM otherwise parks the cursor.
-pub fn release(
-    out: &mut impl Write,
-    panel_height: u16,
-    total_rows: u16,
-    total_cols: u16,
-) -> io::Result<()> {
+/// Blank the panel rows and give the whole screen back to the shell.
+pub fn release(out: &mut impl Write, panel_height: u16, total_rows: u16) -> io::Result<()> {
     if panel_height > 0 && panel_height < total_rows {
-        clear_panel_rows(out, panel_height, total_rows, total_cols)?;
+        clear_panel_rows(out, panel_height, total_rows)?;
     }
+    restore_full_screen(out, total_rows)
+}
+
+/// Reset the scrolling region to the full screen without clearing any rows,
+/// leaving the cursor on the bottom row.
+pub fn restore_full_screen(out: &mut impl Write, total_rows: u16) -> io::Result<()> {
     reset_scroll_region(out, total_rows)?;
     // CRITICAL: DECSTBM (\x1b[r) moves the cursor to home (1,1) on
     // xterm-class terminals (incl. tmux). If we leave the cursor there, the
@@ -268,12 +262,7 @@ fn reset_scroll_region(out: &mut impl Write, total_rows: u16) -> io::Result<()> 
     Ok(())
 }
 
-fn clear_panel_rows(
-    out: &mut impl Write,
-    panel_height: u16,
-    total_rows: u16,
-    _total_cols: u16,
-) -> io::Result<()> {
+fn clear_panel_rows(out: &mut impl Write, panel_height: u16, total_rows: u16) -> io::Result<()> {
     let top = total_rows - panel_height;
     for row in 0..panel_height {
         out.queue(MoveTo(0, top + row))?;
@@ -304,14 +293,11 @@ pub fn paint(
     out.queue(Hide)?;
 
     if view.show_help {
-        paint_help(out, view, top, panel_height, total_cols)?;
+        paint_help(out, top, panel_height, total_cols)?;
     } else {
         paint_normal(out, view, top, panel_height, total_cols)?;
     }
 
-    // Cursor placement:
-    //  * cursor_in_input → put it where the user is editing.
-    //  * else            → restore the shell cursor by absolute position.
     if cursor_in_input && !view.show_help {
         let input_row = top + panel_height.saturating_sub(1);
         let (_, cursor_col) = input_line(view, total_cols as usize);
@@ -330,7 +316,6 @@ pub fn paint(
     out.flush()
 }
 
-/// Standard panel layout: header / hints / queue rows / input.
 fn paint_normal(
     out: &mut impl Write,
     view: &PanelState<'_>,
@@ -340,9 +325,6 @@ fn paint_normal(
 ) -> io::Result<()> {
     let mut row = top;
 
-    // State lives in the header; actionable feedback has a single notice row.
-    // Queue list. Reserve `panel_height - 3` rows for items (header(1) +
-    // input(1) + hints(1) accounted for).
     let list_capacity = panel_height.saturating_sub(3 + notice_rows(view, panel_height)) as usize;
 
     out.queue(MoveTo(0, row))?;
@@ -475,10 +457,7 @@ fn paint_header(
     let mut header = format!(" {state} ");
     if let Some((first, last, total)) = queue_overflow(view, list_capacity) {
         if first > 1 {
-            header.push_str(&format!("{first}–{last} of {total}"));
-            if first > 1 {
-                header.push_str(" ↑");
-            }
+            header.push_str(&format!("{first}–{last} of {total} ↑"));
             if last < total {
                 header.push_str(" ↓");
             }
@@ -714,12 +693,10 @@ fn input_line(view: &PanelState<'_>, cols: usize) -> (String, usize) {
 /// occupies most of the screen so we have room for everything.
 fn paint_help(
     out: &mut impl Write,
-    _view: &PanelState<'_>,
     top: u16,
     panel_height: u16,
     total_cols: u16,
 ) -> io::Result<()> {
-    // Title row.
     out.queue(MoveTo(0, top))?;
     out.queue(Clear(ClearType::CurrentLine))?;
     out.queue(SetForegroundColor(Color::Yellow))?;
@@ -773,7 +750,6 @@ fn paint_help(
             continue;
         }
         if k.is_empty() {
-            // Section note / preamble
             out.queue(SetForegroundColor(Color::Grey))?;
             out.queue(SetAttribute(crossterm::style::Attribute::Italic))?;
             out.queue(Print(clip_to_width(
@@ -785,7 +761,6 @@ fn paint_help(
             continue;
         }
         if d.is_empty() {
-            // Section header
             out.queue(SetForegroundColor(Color::Yellow))?;
             out.queue(SetAttribute(crossterm::style::Attribute::Bold))?;
             out.queue(Print(clip_to_width(k, total_cols as usize)))?;
@@ -1034,6 +1009,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1071,6 +1047,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "added: echo 界🙂",
+            status_kind: StatusKind::Routine,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1104,6 +1081,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1137,6 +1115,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1169,6 +1148,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1206,6 +1186,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1230,6 +1211,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1254,6 +1236,7 @@ mod tests {
 
         view.editing_index = Some(11);
         view.status = "saved: cmd 11";
+        view.status_kind = StatusKind::Routine;
         let mut out = Vec::new();
         paint_header(&mut out, &view, 100, 8).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
@@ -1336,6 +1319,7 @@ mod tests {
         queue.paused = true;
         let mut view = view_with(&queue, true);
         view.status = "queue paused by another session";
+        view.status_kind = StatusKind::Paused;
         let height = panel_height(&view, 30);
         assert_eq!(height, 4);
         let mut out = Vec::new();
@@ -1352,10 +1336,12 @@ mod tests {
         let mut view = view_with(&queue, true);
         for status in ["added: ls", "saved: ls", "dispatched: ls", "queue resumed"] {
             view.status = status;
+            view.status_kind = StatusKind::Routine;
             assert_eq!(panel_height(&view, 30), 3);
             assert!(panel_notice(&view).is_none());
         }
         view.status = "queue save failed: disk full";
+        view.status_kind = StatusKind::Notice;
         assert_eq!(panel_notice(&view), Some(view.status));
         let mut out = Vec::new();
         paint(&mut out, &view, 4, 30, 80, true, (0, 0)).unwrap();
@@ -1364,6 +1350,7 @@ mod tests {
         view.status = "queue cleared by another session";
         assert_eq!(panel_notice(&view), Some(view.status));
         view.status = "removed: ls";
+        view.status_kind = StatusKind::Outcome;
         view.activity = Some("Removed ls — Alt-U restores paused");
         assert_eq!(panel_notice(&view), view.activity);
     }

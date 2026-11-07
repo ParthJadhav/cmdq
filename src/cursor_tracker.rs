@@ -55,10 +55,6 @@ impl CursorTracker {
         self.row = self.row.min(self.rows.saturating_sub(1));
     }
 
-    pub fn set_to_bottom_left(&mut self) {
-        self.set_position(0, self.rows.saturating_sub(1));
-    }
-
     pub fn set_position(&mut self, col: u16, row: u16) {
         self.col = col.min(self.cols.saturating_sub(1));
         self.row = row.min(self.rows.saturating_sub(1));
@@ -78,8 +74,6 @@ impl CursorTracker {
         let mut idx = 0;
         while idx < bytes.len() {
             if matches!(self.state, State::Ground) {
-                // Runs of printable ASCII are the bulk of most output; advance
-                // the column arithmetically instead of one byte at a time.
                 let run = bytes[idx..]
                     .iter()
                     .take_while(|&&b| (0x20..=0x7e).contains(&b))
@@ -103,8 +97,6 @@ impl CursorTracker {
             self.col = (col + n) as u16;
             return;
         }
-        // Fill the current line to the deferred-wrap column, then every
-        // further `cols` characters is one wrap that again ends at `cols`.
         let rest = n - (cols - col);
         let full_lines = rest / cols;
         let remainder = rest % cols;
@@ -272,12 +264,12 @@ impl CursorTracker {
                     .min(self.cols - 1)
             }
             b'D' => self.col = self.col.saturating_sub(param_or(&params, 0, 1)),
-            b'G' => self.col = one_based_param_or(&params, 0, 1).min(self.cols) - 1,
+            b'G' => self.col = param_or(&params, 0, 1).min(self.cols) - 1,
             b'H' | b'f' => {
-                self.row = one_based_param_or(&params, 0, 1).min(self.rows) - 1;
-                self.col = one_based_param_or(&params, 1, 1).min(self.cols) - 1;
+                self.row = param_or(&params, 0, 1).min(self.rows) - 1;
+                self.col = param_or(&params, 1, 1).min(self.cols) - 1;
             }
-            b'd' => self.row = one_based_param_or(&params, 0, 1).min(self.rows) - 1,
+            b'd' => self.row = param_or(&params, 0, 1).min(self.rows) - 1,
             b's' => self.saved = Some(self.position()),
             b'u' => {
                 if let Some((col, row)) = self.saved {
@@ -306,10 +298,6 @@ fn parse_params(bytes: &[u8]) -> Vec<Option<u16>> {
 
 fn param_or(params: &[Option<u16>], idx: usize, default: u16) -> u16 {
     params.get(idx).and_then(|v| *v).unwrap_or(default).max(1)
-}
-
-fn one_based_param_or(params: &[Option<u16>], idx: usize, default: u16) -> u16 {
-    param_or(params, idx, default)
 }
 
 fn utf8_expected_len(b: u8) -> Option<usize> {

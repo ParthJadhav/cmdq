@@ -31,19 +31,12 @@ struct Harness {
 }
 
 impl Harness {
-    fn spawn(suffix: &str) -> Option<Self> {
+    fn spawn(suffix: &str) -> Self {
         Self::spawn_with_size(suffix, 30, 100)
     }
 
-    fn spawn_with_size(suffix: &str, rows: u16, cols: u16) -> Option<Self> {
-        if !std::path::Path::new("/bin/bash").exists() {
-            return None;
-        }
+    fn spawn_with_size(suffix: &str, rows: u16, cols: u16) -> Self {
         let bin = cmdq_binary_path();
-        if !bin.exists() {
-            eprintln!("cmdq binary not built; skipping ({})", bin.display());
-            return None;
-        }
 
         let tmp =
             std::env::temp_dir().join(format!("cmdq-pathA-{}-{}", std::process::id(), suffix));
@@ -64,7 +57,7 @@ impl Harness {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .ok()?;
+            .unwrap();
 
         let mut cmd = CommandBuilder::new(bin.as_os_str());
         cmd.arg("--shell");
@@ -73,10 +66,10 @@ impl Harness {
         cmd.env("HOME", &tmp);
         cmd.env("XDG_DATA_HOME", tmp.join("data"));
 
-        let child = pair.slave.spawn_command(cmd).ok()?;
+        let child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);
 
-        let reader = pair.master.try_clone_reader().ok()?;
+        let reader = pair.master.try_clone_reader().unwrap();
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             let mut reader = reader;
@@ -88,12 +81,12 @@ impl Harness {
             }
         });
 
-        Some(Self {
+        Self {
             home: tmp,
             master: pair.master,
             child,
             rx,
-        })
+        }
     }
 
     fn writer(&self) -> Box<dyn Write + Send> {
@@ -146,9 +139,7 @@ impl Harness {
 /// of Path A.
 #[test]
 fn does_not_enter_alt_screen() {
-    let Some(h) = Harness::spawn("noalt") else {
-        return;
-    };
+    let h = Harness::spawn("noalt");
     let mut accum = Vec::new();
     h.drain_for(&mut accum, Duration::from_millis(800));
 
@@ -175,9 +166,7 @@ fn does_not_enter_alt_screen() {
 /// terminal emulator.
 #[test]
 fn enables_bracketed_paste_and_preserves_outer_keyboard_mode() {
-    let Some(h) = Harness::spawn("setup") else {
-        return;
-    };
+    let h = Harness::spawn("setup");
     let mut accum = Vec::new();
     h.drain_for(&mut accum, Duration::from_millis(800));
 
@@ -203,9 +192,7 @@ fn enables_bracketed_paste_and_preserves_outer_keyboard_mode() {
 /// colors / hyperlinks / images / OSC 52 "just work" under Path A.
 #[test]
 fn shell_sgr_passes_through_verbatim() {
-    let Some(h) = Harness::spawn("sgr") else {
-        return;
-    };
+    let h = Harness::spawn("sgr");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -257,9 +244,7 @@ fn shell_sgr_passes_through_verbatim() {
 /// reach the user's terminal unmodified.
 #[test]
 fn osc8_hyperlink_passes_through_verbatim() {
-    let Some(h) = Harness::spawn("osc8") else {
-        return;
-    };
+    let h = Harness::spawn("osc8");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -302,9 +287,7 @@ fn osc8_hyperlink_passes_through_verbatim() {
 /// parse, strip, or reinterpret them.
 #[test]
 fn osc52_clipboard_passes_through_verbatim() {
-    let Some(h) = Harness::spawn("osc52") else {
-        return;
-    };
+    let h = Harness::spawn("osc52");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -335,47 +318,36 @@ fn osc52_clipboard_passes_through_verbatim() {
 /// untouched at the bottom.
 #[test]
 fn decstbm_set_when_panel_reserves_and_reset_on_exit() {
-    let Some(h) = Harness::spawn("decstbm") else {
-        return;
-    };
+    let h = Harness::spawn("decstbm");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
     h.wait_for(&mut accum, Duration::from_secs(3), |s| s.contains(&b'$'));
 
     // Press Ctrl-Q to force the queue panel open even at the prompt.
+    let start = accum.len();
     writer.write_all(&[0x11]).unwrap();
     writer.flush().unwrap();
-    h.drain_for(&mut accum, Duration::from_millis(500));
-
-    // Scrolling region prefix: `\x1b[1;` followed by a number followed by `r`.
-    // We don't want to be brittle about the exact row count (it depends on
-    // queue length), so just check the prefix is there.
     assert!(
-        contains(&accum, b"\x1b[1;"),
-        "expected DECSTBM `\\x1b[1;Nr` after Ctrl-Q; output: {:?}",
-        String::from_utf8_lossy(&accum)
-    );
-    // Sanity: the matched prefix is followed by `r` somewhere in the next
-    // few bytes (the scrolling-region terminator).
-    assert!(
-        find_decstbm(&accum),
-        "DECSTBM prefix found but not terminated with `r`; output: {:?}",
-        String::from_utf8_lossy(&accum)
+        h.wait_for(&mut accum, Duration::from_secs(3), |s| reserves_panel(
+            &s[start..],
+            30
+        )),
+        "expected a panel scrolling region `\\x1b[1;Nr` (N < 30) after Ctrl-Q; output: {:?}",
+        String::from_utf8_lossy(&accum[start..])
     );
 
-    // Toggle off — cmdq should reset the scrolling region. The reset form
-    // is either the empty-parameter `\x1b[r` or the explicit-bounds
-    // `\x1b[1;<rows>r` covering the full screen. (cmdq uses the explicit
-    // form for portability across terminal emulators.)
+    // Toggle off — cmdq should reset the scrolling region to the full screen.
+    let start = accum.len();
     writer.write_all(&[0x11]).unwrap(); // Ctrl-Q again
     writer.flush().unwrap();
-    h.drain_for(&mut accum, Duration::from_millis(500));
-
     assert!(
-        decstbm_was_reset(&accum, 30),
+        h.wait_for(&mut accum, Duration::from_secs(3), |s| decstbm_was_reset(
+            &s[start..],
+            30
+        )),
         "expected DECSTBM reset (`\\x1b[r` or `\\x1b[1;<rows>r`) after panel hidden; output: {:?}",
-        String::from_utf8_lossy(&accum)
+        String::from_utf8_lossy(&accum[start..])
     );
 
     let _ = writer.write_all(b"exit\r");
@@ -387,17 +359,19 @@ fn decstbm_set_when_panel_reserves_and_reset_on_exit() {
 #[test]
 #[cfg(unix)]
 fn sigterm_restores_terminal_state_when_panel_reserved() {
-    let Some(mut h) = Harness::spawn("sigterm-cleanup") else {
-        return;
-    };
+    let mut h = Harness::spawn("sigterm-cleanup");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
     h.wait_for(&mut accum, Duration::from_secs(3), |s| s.contains(&b'$'));
     writer.write_all(&[0x11]).unwrap();
     writer.flush().unwrap();
-    h.drain_for(&mut accum, Duration::from_millis(500));
-    assert!(find_decstbm(&accum), "panel never reserved before SIGTERM");
+    assert!(
+        h.wait_for(&mut accum, Duration::from_secs(3), |s| reserves_panel(
+            s, 30
+        )),
+        "panel never reserved before SIGTERM"
+    );
 
     let before_sigterm = accum.len();
     let pid = h.child.process_id().expect("cmdq child pid");
@@ -440,9 +414,7 @@ fn sigterm_restores_terminal_state_when_panel_reserved() {
 
 #[test]
 fn child_exit_while_in_alt_screen_restores_outer_terminal() {
-    let Some(mut h) = Harness::spawn("alt-exit-cleanup") else {
-        return;
-    };
+    let mut h = Harness::spawn("alt-exit-cleanup");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -488,9 +460,7 @@ fn child_exit_while_in_alt_screen_restores_outer_terminal() {
 #[test]
 #[cfg(unix)]
 fn sigterm_while_in_alt_screen_restores_outer_terminal() {
-    let Some(mut h) = Harness::spawn("sigterm-alt-cleanup") else {
-        return;
-    };
+    let mut h = Harness::spawn("sigterm-alt-cleanup");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -550,9 +520,7 @@ fn sigterm_while_in_alt_screen_restores_outer_terminal() {
 #[test]
 #[cfg(unix)]
 fn sigterm_while_mouse_and_focus_modes_enabled_restores_outer_terminal() {
-    let Some(mut h) = Harness::spawn("sigterm-mouse-focus-cleanup") else {
-        return;
-    };
+    let mut h = Harness::spawn("sigterm-mouse-focus-cleanup");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -616,9 +584,7 @@ fn sigterm_while_mouse_and_focus_modes_enabled_restores_outer_terminal() {
 
 #[test]
 fn tiny_terminal_does_not_reserve_invisible_panel() {
-    let Some(h) = Harness::spawn_with_size("tiny", 4, 10) else {
-        return;
-    };
+    let h = Harness::spawn_with_size("tiny", 4, 10);
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -655,12 +621,13 @@ fn tiny_terminal_does_not_reserve_invisible_panel() {
     let before_second_ctrl_q = accum.len();
     writer.write_all(&[0x11]).unwrap();
     writer.flush().unwrap();
-    h.drain_for(&mut accum, Duration::from_millis(500));
-    let after_second_ctrl_q = &accum[before_second_ctrl_q..];
     assert!(
-        find_decstbm(after_second_ctrl_q),
+        h.wait_for(&mut accum, Duration::from_secs(3), |s| reserves_panel(
+            &s[before_second_ctrl_q..],
+            30
+        )),
         "Ctrl-Q after resizing to usable size should reserve the panel: {:?}",
-        String::from_utf8_lossy(after_second_ctrl_q)
+        String::from_utf8_lossy(&accum[before_second_ctrl_q..])
     );
 
     let _ = writer.write_all(b"exit\r");
@@ -670,9 +637,7 @@ fn tiny_terminal_does_not_reserve_invisible_panel() {
 
 #[test]
 fn resize_hidden_layout_updates_child_pty_size() {
-    let Some(h) = Harness::spawn("resize-hidden") else {
-        return;
-    };
+    let h = Harness::spawn("resize-hidden");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -709,9 +674,7 @@ fn resize_hidden_layout_updates_child_pty_size() {
 
 #[test]
 fn resize_storm_keeps_shell_usable() {
-    let Some(h) = Harness::spawn("resize") else {
-        return;
-    };
+    let h = Harness::spawn("resize");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -719,7 +682,9 @@ fn resize_storm_keeps_shell_usable() {
     writer.write_all(&[0x11]).unwrap(); // force panel
     writer.flush().unwrap();
     assert!(
-        h.wait_for(&mut accum, Duration::from_secs(2), find_decstbm),
+        h.wait_for(&mut accum, Duration::from_secs(2), |s| reserves_panel(
+            s, 30
+        )),
         "panel did not reserve before resize storm; output: {:?}",
         String::from_utf8_lossy(&accum)
     );
@@ -757,9 +722,7 @@ fn resize_storm_keeps_shell_usable() {
 
 #[test]
 fn resize_from_reserved_panel_resets_scroll_region_to_new_height() {
-    let Some(h) = Harness::spawn("resize-reset-new-height") else {
-        return;
-    };
+    let h = Harness::spawn("resize-reset-new-height");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -805,9 +768,7 @@ fn resize_from_reserved_panel_resets_scroll_region_to_new_height() {
 /// must see the full terminal height, not cmdq's shrunken shell PTY.
 #[test]
 fn alt_screen_releases_panel_before_forwarding_and_restores_after_exit() {
-    let Some(h) = Harness::spawn("altorder") else {
-        return;
-    };
+    let h = Harness::spawn("altorder");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -876,9 +837,7 @@ fn alt_screen_releases_panel_before_forwarding_and_restores_after_exit() {
 
 #[test]
 fn combined_alt_screen_and_bracketed_paste_mode_wraps_child_paste() {
-    let Some(h) = Harness::spawn("altpaste-combined") else {
-        return;
-    };
+    let h = Harness::spawn("altpaste-combined");
     let mut writer = h.writer();
     let mut accum = Vec::new();
     let paste_file =
@@ -933,9 +892,7 @@ fn combined_alt_screen_and_bracketed_paste_mode_wraps_child_paste() {
 
 #[test]
 fn alt_screen_exit_restores_panel_before_trailing_same_chunk_output() {
-    let Some(h) = Harness::spawn("alttrail") else {
-        return;
-    };
+    let h = Harness::spawn("alttrail");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -981,9 +938,7 @@ fn alt_screen_exit_restores_panel_before_trailing_same_chunk_output() {
 
 #[test]
 fn split_alt_screen_enter_is_not_interleaved_with_panel_release() {
-    let Some(h) = Harness::spawn("altsplit") else {
-        return;
-    };
+    let h = Harness::spawn("altsplit");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1032,9 +987,7 @@ fn split_alt_screen_enter_is_not_interleaved_with_panel_release() {
 fn mouse_capture_releases_panel_and_forwards_mouse_events() {
     // Configure input before announcing readiness. Bash's read -s -n can
     // otherwise flush a mouse reply arriving before it changes terminal mode.
-    let Some(h) = Harness::spawn("mouse-capture") else {
-        return;
-    };
+    let h = Harness::spawn("mouse-capture");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1095,9 +1048,7 @@ fn mouse_capture_releases_panel_and_forwards_mouse_events() {
 
 #[test]
 fn focus_events_are_forwarded_when_child_enables_focus_reporting() {
-    let Some(h) = Harness::spawn("focus-events") else {
-        return;
-    };
+    let h = Harness::spawn("focus-events");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1136,9 +1087,7 @@ fn focus_events_are_forwarded_when_child_enables_focus_reporting() {
 
 #[test]
 fn command_end_repairs_child_left_mouse_and_focus_modes() {
-    let Some(h) = Harness::spawn("mode-leak-command-end") else {
-        return;
-    };
+    let h = Harness::spawn("mode-leak-command-end");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1180,9 +1129,7 @@ fn command_end_repairs_child_left_mouse_and_focus_modes() {
 
 #[test]
 fn command_end_repairs_child_left_alt_screen() {
-    let Some(h) = Harness::spawn("alt-leak-command-end") else {
-        return;
-    };
+    let h = Harness::spawn("alt-leak-command-end");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1220,9 +1167,7 @@ fn command_end_repairs_child_left_alt_screen() {
 
 #[test]
 fn delayed_split_alt_screen_enter_stays_contiguous() {
-    let Some(h) = Harness::spawn("altdelayed") else {
-        return;
-    };
+    let h = Harness::spawn("altdelayed");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1264,9 +1209,7 @@ fn delayed_split_alt_screen_enter_stays_contiguous() {
 
 #[test]
 fn slow_progress_split_alt_screen_enter_stays_contiguous() {
-    let Some(h) = Harness::spawn("altslowprogress") else {
-        return;
-    };
+    let h = Harness::spawn("altslowprogress");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1313,9 +1256,7 @@ fn slow_progress_split_alt_screen_enter_stays_contiguous() {
 
 #[test]
 fn incomplete_escape_fragment_waits_for_completion() {
-    let Some(h) = Harness::spawn("escpending") else {
-        return;
-    };
+    let h = Harness::spawn("escpending");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1351,9 +1292,7 @@ fn incomplete_escape_fragment_waits_for_completion() {
 
 #[test]
 fn panel_paint_does_not_clobber_child_cursor_save_restore_slot() {
-    let Some(h) = Harness::spawn("cursorsave") else {
-        return;
-    };
+    let h = Harness::spawn("cursorsave");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1367,7 +1306,9 @@ fn panel_paint_does_not_clobber_child_cursor_save_restore_slot() {
 
     let ok = h.wait_for(&mut accum, Duration::from_secs(6), |s| {
         let tail = &s[start..];
-        contains(tail, b"\x1b7SAVED") && contains(tail, b"\x1b8RESTORED") && find_decstbm(tail)
+        contains(tail, b"\x1b7SAVED")
+            && contains(tail, b"\x1b8RESTORED")
+            && reserves_panel(tail, 30)
     });
     assert!(
         ok,
@@ -1396,9 +1337,7 @@ fn panel_paint_does_not_clobber_child_cursor_save_restore_slot() {
 
 #[test]
 fn panel_restore_tracks_wide_child_output_cursor_width() {
-    let Some(h) = Harness::spawn("widecursor") else {
-        return;
-    };
+    let h = Harness::spawn("widecursor");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1437,9 +1376,7 @@ fn panel_restore_tracks_wide_child_output_cursor_width() {
 
 #[test]
 fn panel_restore_ignores_osc_payload_width_for_child_cursor() {
-    let Some(h) = Harness::spawn("osccursor") else {
-        return;
-    };
+    let h = Harness::spawn("osccursor");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1483,9 +1420,7 @@ fn panel_restore_ignores_osc_payload_width_for_child_cursor() {
 
 #[test]
 fn panel_restore_ignores_dcs_payload_width_for_child_cursor() {
-    let Some(h) = Harness::spawn("dcscursor") else {
-        return;
-    };
+    let h = Harness::spawn("dcscursor");
     let mut writer = h.writer();
     let mut accum = Vec::new();
 
@@ -1553,6 +1488,42 @@ fn find_bytes_after(haystack: &[u8], needle: &[u8], offset: usize) -> Option<usi
 
 /// Look for a complete DECSTBM `CSI 1 ; <digits> r` sequence somewhere in
 /// the stream. (We don't pin the row count, just the shape.)
+/// Bottom rows of every `\x1b[1;Nr` scrolling region set in `haystack`.
+fn scroll_region_bottoms(haystack: &[u8]) -> Vec<u16> {
+    let prefix = b"\x1b[1;";
+    let mut bottoms = Vec::new();
+    let mut i = 0;
+    while let Some(at) = find(&haystack[i..], prefix) {
+        let digits_start = i + at + prefix.len();
+        let digits_end = haystack[digits_start..]
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .map_or(haystack.len(), |n| digits_start + n);
+        if haystack.get(digits_end) == Some(&b'r')
+            && let Ok(n) = std::str::from_utf8(&haystack[digits_start..digits_end])
+                .unwrap()
+                .parse()
+        {
+            bottoms.push(n);
+        }
+        i = digits_start;
+    }
+    bottoms
+}
+
+/// A scrolling region that leaves rows below it for the panel, as opposed
+/// to the full-screen reset `\x1b[1;<rows>r`.
+fn reserves_panel(haystack: &[u8], rows: u16) -> bool {
+    scroll_region_bottoms(haystack)
+        .iter()
+        .any(|&bottom| bottom < rows)
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Any scrolling-region change at all, reserve or reset.
 fn find_decstbm(haystack: &[u8]) -> bool {
     let prefix = b"\x1b[1;";
     let mut i = 0;

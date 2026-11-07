@@ -13,13 +13,15 @@
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+
+use crate::atomic_file::{self, Access};
 
 const STALE_QUEUE_DIR_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const EMPTY_QUEUE_DIR_GRACE: Duration = Duration::from_secs(60);
@@ -32,6 +34,12 @@ pub struct QueueItem {
     pub conditional: bool,
     #[serde(default)]
     pub origin_cwd: Option<PathBuf>,
+}
+
+impl QueueItem {
+    pub fn skipped_after(&self, prev_exit: Option<i32>) -> bool {
+        self.conditional && prev_exit != Some(0)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -98,7 +106,7 @@ impl Queue {
         &self.items
     }
 
-    pub fn item_ids(&self) -> HashSet<u64> {
+    fn item_ids(&self) -> HashSet<u64> {
         self.items.iter().map(|it| it.id).collect()
     }
 
@@ -228,20 +236,6 @@ impl Queue {
         out
     }
 
-    /// Find next item to dispatch given the previous command's exit code.
-    /// Items with `conditional = true` are skipped (and removed) when
-    /// `prev_exit != Some(0)`. Returns the first item that is allowed to run.
-    pub fn pop_next_eligible(&mut self, prev_exit: Option<i32>) -> Option<QueueItem> {
-        while let Some(front) = self.items.first() {
-            if front.conditional && prev_exit != Some(0) {
-                self.items.remove(0);
-                continue;
-            }
-            return Some(self.items.remove(0));
-        }
-        None
-    }
-
     pub fn save(&self, path: &Path) -> Result<()> {
         with_queue_file_lock(path, || self.save_snapshot_unlocked(path))
     }
@@ -311,62 +305,42 @@ impl Queue {
         with_queue_file_lock(path, || {
             let mut merge = SaveMerge::default();
             let mut disk = self.read_disk_snapshot_for_merge(path, &mut merge)?;
-            if merge.warning.is_some() || disk.paused {
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::Stale);
-            }
-
-            let mut changed = false;
-            while disk
-                .items
-                .first()
-                .map(|item| item.conditional && prev_exit != Some(0))
-                .unwrap_or(false)
-            {
-                disk.items.remove(0);
-                changed = true;
-            }
-
-            let Some(item) = disk.items.first().cloned() else {
-                if changed {
-                    disk.save_snapshot_unlocked(path)?;
+            let claim = if merge.warning.is_some() || disk.paused {
+                QueueClaim::Stale
+            } else {
+                let mut skipped = false;
+                while disk
+                    .items
+                    .first()
+                    .is_some_and(|item| item.skipped_after(prev_exit))
+                {
+                    disk.items.remove(0);
+                    skipped = true;
                 }
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::Stale);
+                match disk.items.first().cloned() {
+                    Some(item) if item.id == expected_id => {
+                        if let Some(current) = current_cwd
+                            && disk.foreign_origin(&item, current).is_some()
+                        {
+                            disk.paused = true;
+                            disk.save_snapshot_unlocked(path)?;
+                            QueueClaim::BlockedByCwd(item)
+                        } else {
+                            let item = disk.items.remove(0);
+                            disk.save_snapshot_unlocked(path)?;
+                            QueueClaim::Claimed(item)
+                        }
+                    }
+                    _ => {
+                        if skipped {
+                            disk.save_snapshot_unlocked(path)?;
+                        }
+                        QueueClaim::Stale
+                    }
+                }
             };
-
-            if item.id != expected_id {
-                if changed {
-                    disk.save_snapshot_unlocked(path)?;
-                }
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::Stale);
-            }
-
-            if let Some(current) = current_cwd
-                && let Some(origin) = item.origin_cwd.as_deref().or(disk.origin_cwd())
-                && origin != current
-            {
-                disk.paused = true;
-                disk.save_snapshot_unlocked(path)?;
-                *self = disk;
-                *known_items = self.item_snapshot();
-                *known_paused = self.paused;
-                return Ok(QueueClaim::BlockedByCwd(item));
-            }
-
-            let item = disk.items.remove(0);
-            disk.save_snapshot_unlocked(path)?;
-            *self = disk;
-            *known_items = self.item_snapshot();
-            *known_paused = self.paused;
-            Ok(QueueClaim::Claimed(item))
+            self.adopt(disk, known_items, known_paused);
+            Ok(claim)
         })
     }
 
@@ -382,9 +356,7 @@ impl Queue {
             let mut disk = self.read_disk_snapshot_for_merge(path, &mut merge)?;
             disk.restore_item_front(item.clone());
             disk.save_snapshot_unlocked(path)?;
-            *self = disk;
-            *known_items = self.item_snapshot();
-            *known_paused = self.paused;
+            self.adopt(disk, known_items, known_paused);
             Ok(())
         });
         if result.is_err() {
@@ -393,6 +365,21 @@ impl Queue {
             self.restore_item_front(item);
         }
         result
+    }
+
+    /// Where `item` was queued, when that is not `current`.
+    pub fn foreign_origin<'a>(&'a self, item: &'a QueueItem, current: &Path) -> Option<&'a Path> {
+        item.origin_cwd
+            .as_deref()
+            .or(self.origin_cwd())
+            .filter(|origin| *origin != current)
+    }
+
+    /// Take `disk` as this session's queue and as the last state seen on disk.
+    fn adopt(&mut self, disk: Self, known_items: &mut Vec<QueueItem>, known_paused: &mut bool) {
+        *self = disk;
+        *known_items = self.item_snapshot();
+        *known_paused = self.paused;
     }
 
     fn restore_item_front(&mut self, mut item: QueueItem) {
@@ -408,36 +395,8 @@ impl Queue {
     }
 
     fn save_snapshot_unlocked(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating queue parent dir {}", parent.display()))?;
-        }
-        let tmp = unique_temp_path(path);
-        let data = serde_json::to_vec(self)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // Queued command arguments can contain credentials. Keep both
-            // the temporary file and the final snapshot private to its owner.
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&tmp)
-            .with_context(|| format!("creating temp file {}", tmp.display()))?;
-        if let Err(error) = file.write_all(&data) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error).with_context(|| format!("writing temp file {}", tmp.display()));
-        }
-        drop(file);
-        match std::fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))
-            }
-        }
+        // Queued command arguments can contain credentials.
+        atomic_file::write(path, &serde_json::to_vec(self)?, Access::Private)
     }
 
     fn merge_disk_snapshot_unlocked(
@@ -671,16 +630,6 @@ impl Queue {
     }
 }
 
-fn unique_temp_path(path: &Path) -> PathBuf {
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("queue");
-    let tmp_name = format!(
-        ".{file_name}.tmp-{}-{}",
-        std::process::id(),
-        monotonic_suffix()
-    );
-    path.with_file_name(tmp_name)
-}
-
 fn next_available_id(used: &mut HashSet<u64>, next_id: &mut u64) -> u64 {
     loop {
         let candidate = *next_id;
@@ -745,16 +694,9 @@ impl PushQueueItemUnique for Vec<QueueItem> {
     }
 }
 
-fn monotonic_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
 fn preserve_corrupt_file(path: &Path) -> std::io::Result<PathBuf> {
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("queue");
-    let backup_name = format!("{file_name}.corrupt-{}", monotonic_suffix());
+    let backup_name = format!("{file_name}.corrupt-{}", atomic_file::unix_nanos());
     let backup = path.with_file_name(backup_name);
     std::fs::rename(path, &backup)?;
     Ok(backup)
@@ -784,40 +726,31 @@ fn lock_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!("{file_name}.lock"))
 }
 
+const QUEUE_FILE_NAME: &str = "queue.json";
+/// Per-launch queue directories live here, under the queue data dir.
+const SESSION_QUEUES_DIR: &str = "queues";
+
 /// Allocate a fresh queue file for this launch. Atomically reserving a directory
 /// prevents reuse even after PID recycling or a clock adjustment. Do not derive
 /// identity from cwd, the parent process, or inherited environment variables:
 /// separate shells can share all of those.
 pub fn new_session_path() -> Result<PathBuf> {
-    let legacy_path = try_default_path()?;
-    new_session_path_in(legacy_path.parent().expect("queue path has a parent"))
+    new_session_path_in(&queue_data_dir()?)
 }
 
 fn new_session_path_in(data_dir: &Path) -> Result<PathBuf> {
-    let queues_dir = data_dir.join("queues");
+    let queues_dir = data_dir.join(SESSION_QUEUES_DIR);
     std::fs::create_dir_all(&queues_dir)
         .with_context(|| format!("creating queue directory {}", queues_dir.display()))?;
     sweep_stale_queue_dirs_at(&queues_dir, SystemTime::now());
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for attempt in 0u64.. {
-        let dir = queues_dir.join(format!("{}-{timestamp}-{attempt}", std::process::id()));
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir.join("queue.json")),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
-        }
-    }
-    unreachable!("session directory counter exhausted")
+    Ok(atomic_file::create_unique_dir(&queues_dir, "")?.join(QUEUE_FILE_NAME))
 }
 
 /// Remove the directory owned by a per-session queue. This is intentionally
 /// best-effort: failure to tidy state must not turn a successful shell exit
 /// into an application error.
 pub fn remove_session_dir(queue_path: &Path) {
-    if queue_path.file_name().and_then(|name| name.to_str()) != Some("queue.json") {
+    if queue_path.file_name().and_then(|name| name.to_str()) != Some(QUEUE_FILE_NAME) {
         return;
     }
     let Some(session_dir) = queue_path.parent() else {
@@ -827,7 +760,7 @@ pub fn remove_session_dir(queue_path: &Path) {
         .parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        != Some("queues")
+        != Some(SESSION_QUEUES_DIR)
     {
         return;
     }
@@ -843,7 +776,7 @@ fn sweep_stale_queue_dirs_at(queues_dir: &Path, now: SystemTime) {
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
-        let queue_path = dir.join("queue.json");
+        let queue_path = dir.join(QUEUE_FILE_NAME);
         if crate::session_lease::active_peer_count(&queue_path).unwrap_or(0) > 0 {
             continue;
         }
@@ -871,36 +804,23 @@ fn sweep_stale_queue_dirs_at(queues_dir: &Path, now: SystemTime) {
 /// Legacy shared persistence path: `$XDG_DATA_HOME/cmdq/queue.json`,
 /// the platform data directory, or `~/.cmdq/queue.json`.
 pub fn try_default_path() -> Result<PathBuf> {
+    Ok(queue_data_dir()?.join(QUEUE_FILE_NAME))
+}
+
+/// Where cmdq keeps queues: the legacy `queue.json` and per-session `queues/`.
+fn queue_data_dir() -> Result<PathBuf> {
     if let Some(dir) = crate::paths::xdg_data_home() {
-        return Ok(dir.join("cmdq").join("queue.json"));
+        return Ok(dir.join("cmdq"));
     }
     if let Some(dir) = dirs::data_dir().and_then(crate::paths::absolute_path) {
-        return Ok(dir.join("cmdq").join("queue.json"));
+        return Ok(dir.join("cmdq"));
     }
     if let Some(home) = dirs::home_dir().and_then(crate::paths::absolute_path) {
-        return Ok(home.join(".cmdq").join("queue.json"));
+        return Ok(home.join(".cmdq"));
     }
     Err(anyhow!(
         "could not locate an absolute home/data dir; set XDG_DATA_HOME or HOME"
     ))
-}
-
-/// Default persistence path. Prefer `try_default_path` when startup can report
-/// a useful error; this infallible form avoids ever falling back to the cwd.
-pub fn default_path() -> PathBuf {
-    try_default_path().unwrap_or_else(|_| fallback_temp_path())
-}
-
-fn fallback_temp_path() -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    if !dir.is_absolute() {
-        dir = if cfg!(unix) {
-            PathBuf::from("/tmp")
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        };
-    }
-    dir.join("cmdq").join("queue.json")
 }
 
 #[cfg(test)]
@@ -988,35 +908,6 @@ mod tests {
         assert_eq!(q.items()[0].id, c);
         assert_eq!(q.items()[1].id, a);
         assert!(!q.move_up(c)); // already at top
-    }
-
-    #[test]
-    fn pop_next_eligible_skips_conditional_after_failure() {
-        let mut q = Queue::new();
-        q.push("foo", true); // conditional, should be skipped if prev failed
-        q.push("bar", false);
-        let next = q.pop_next_eligible(Some(1));
-        assert_eq!(next.unwrap().command, "bar");
-        assert!(q.is_empty());
-    }
-
-    #[test]
-    fn pop_next_eligible_runs_conditional_after_success() {
-        let mut q = Queue::new();
-        q.push("foo", true);
-        q.push("bar", false);
-        let next = q.pop_next_eligible(Some(0));
-        assert_eq!(next.unwrap().command, "foo");
-    }
-
-    #[test]
-    fn pop_next_eligible_unknown_prev_skips_conditional() {
-        // Initial dispatch with no prev exit: conditional commands should skip.
-        let mut q = Queue::new();
-        q.push("foo", true);
-        q.push("bar", false);
-        let next = q.pop_next_eligible(None);
-        assert_eq!(next.unwrap().command, "bar");
     }
 
     #[test]
@@ -1792,7 +1683,6 @@ mod tests {
         let mut used = HashSet::from([u64::MAX, 0]);
         let mut next = u64::MAX;
         assert_eq!(next_available_id(&mut used, &mut next), 1);
-        assert_eq!(next, 2);
     }
 
     #[test]

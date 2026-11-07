@@ -25,10 +25,6 @@ fn shell_quote(s: &str) -> String {
 #[test]
 fn bash_integration_emits_osc133_markers() {
     let bash = std::path::Path::new("/bin/bash");
-    if !bash.exists() {
-        eprintln!("/bin/bash not available — skipping");
-        return;
-    }
     let bash_path = bash.to_string_lossy().into_owned();
 
     let integration_path = write_temp_integration();
@@ -142,28 +138,75 @@ fn bash_integration_emits_osc133_markers() {
     let _ = child.wait();
 }
 
-#[test]
-fn bash_integration_emits_cwd_before_command_end_after_cd() {
-    let bash = std::path::Path::new("/bin/bash");
-    if !bash.exists() {
+/// Each shell's hook must report the new cwd (OSC 7) before the
+/// command-end marker, so dispatch decisions see the directory the next
+/// queued command would run in.
+fn assert_integration_contract(shell: &str) {
+    let Some(shell_path) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(shell))
+        .find(|path| path.is_file())
+    else {
+        assert!(
+            std::env::var_os("CMDQ_REQUIRE_SHELL_MATRIX").is_none(),
+            "required shell missing: {shell}"
+        );
+        eprintln!("skipping unavailable shell: {shell}");
         return;
-    }
-
-    let integration_path = write_temp_integration();
-    let dir = integration_path.parent().unwrap();
-    let start = dir.join("cwd-before-d-start");
-    let next = dir.join("cwd-before-d-next");
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let start = dir.join("start");
+    let next = dir.join("next");
     std::fs::create_dir_all(&start).unwrap();
     std::fs::create_dir_all(&next).unwrap();
-    let rcfile = dir.join("bashrc-cwd-before-d");
-    std::fs::write(
-        &rcfile,
-        format!(
-            "PS1='PROMPT> '\nsource \"{}\"\n",
-            integration_path.display()
-        ),
-    )
-    .unwrap();
+    let snippet = match shell {
+        "bash" => SHELL_INTEGRATION_BASH,
+        "zsh" => include_str!("../shell/integration.zsh"),
+        _ => include_str!("../shell/integration.fish"),
+    };
+    let integration = dir.join(format!("integration.{shell}"));
+    std::fs::write(&integration, snippet).unwrap();
+
+    let mut cmd = CommandBuilder::new(&shell_path);
+    match shell {
+        "bash" => {
+            let rcfile = dir.join("bashrc");
+            std::fs::write(
+                &rcfile,
+                format!(
+                    "PS1='PROMPT> '\nsource {}\n",
+                    shell_quote(&integration.to_string_lossy())
+                ),
+            )
+            .unwrap();
+            cmd.args(["--noprofile", "--rcfile"]);
+            cmd.arg(&rcfile);
+        }
+        "zsh" => {
+            std::fs::write(
+                dir.join(".zshrc"),
+                format!(
+                    "PROMPT='PROMPT> '\nsource {}\n",
+                    shell_quote(&integration.to_string_lossy())
+                ),
+            )
+            .unwrap();
+            cmd.env("ZDOTDIR", dir);
+        }
+        _ => {
+            cmd.args(["--no-config", "--init-command"]);
+            cmd.arg(format!(
+                "source {}",
+                shell_quote(&integration.to_string_lossy())
+            ));
+            cmd.env("XDG_CONFIG_HOME", dir);
+        }
+    }
+    cmd.arg("-i");
+    cmd.cwd(&start);
+    cmd.env("CMDQ_ACTIVE", "1");
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HOME", dir);
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -173,19 +216,8 @@ fn bash_integration_emits_cwd_before_command_end_after_cd() {
             pixel_height: 0,
         })
         .unwrap();
-
-    let mut cmd = CommandBuilder::new("/bin/bash");
-    cmd.arg("--noprofile");
-    cmd.arg("--rcfile");
-    cmd.arg(&rcfile);
-    cmd.arg("-i");
-    cmd.cwd(&start);
-    cmd.env("CMDQ_ACTIVE", "1");
-    cmd.env("TERM", "xterm-256color");
-
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
-
     let mut reader = pair.master.try_clone_reader().unwrap();
     let mut writer = pair.master.take_writer().unwrap();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -199,50 +231,92 @@ fn bash_integration_emits_cwd_before_command_end_after_cd() {
     });
 
     let mut accum = Vec::new();
-    assert!(wait_for_bytes(
-        &rx,
-        &mut accum,
-        b"\x1b]133;A",
-        Duration::from_secs(5)
-    ));
-
+    assert!(
+        wait_answering_queries(&mut *writer, &rx, &mut accum, b"\x1b]133;A"),
+        "{shell}: no prompt marker; output:\n{}",
+        String::from_utf8_lossy(&accum)
+    );
+    accum.clear();
     writer
         .write_all(format!("cd {}\n", shell_quote(&next.to_string_lossy())).as_bytes())
         .unwrap();
     writer.flush().unwrap();
-    assert!(wait_for_bytes(
-        &rx,
-        &mut accum,
-        b"\x1b]133;D;0",
-        Duration::from_secs(5)
-    ));
+    assert!(
+        wait_answering_queries(&mut *writer, &rx, &mut accum, b"\x1b]133;D;0;cmdq=1"),
+        "{shell}: no command-end marker; output:\n{}",
+        String::from_utf8_lossy(&accum)
+    );
 
     let cwd_marker = format!("\x1b]7;file://localhost{}\x07", next.to_string_lossy());
     let cwd_pos = find_bytes(&accum, cwd_marker.as_bytes()).unwrap_or_else(|| {
         panic!(
-            "missing cwd marker for {}; output:\n{}",
+            "{shell}: missing cwd marker for {}; output:\n{}",
             next.display(),
             String::from_utf8_lossy(&accum)
         )
     });
-    let end_pos = find_bytes(&accum, b"\x1b]133;D;0").expect("missing command-end marker");
+    let end_pos = find_bytes(&accum, b"\x1b]133;D;0;cmdq=1").unwrap();
     assert!(
         cwd_pos < end_pos,
-        "cwd marker must arrive before command end so dispatch uses fresh cwd; output:\n{}",
+        "{shell}: cwd marker must arrive before command end; output:\n{}",
         String::from_utf8_lossy(&accum)
     );
 
-    writer.write_all(b"exit\n").unwrap();
+    // The load guard must not leak into programs the shell starts, or a
+    // nested shell would skip its own integration.
+    writer
+        .write_all(b"/bin/sh -c 'echo nested-guard:${CMDQ_INTEGRATION_LOADED-unset}.'\n")
+        .unwrap();
+    writer.flush().unwrap();
+    assert!(
+        wait_answering_queries(&mut *writer, &rx, &mut accum, b"nested-guard:unset."),
+        "{shell}: integration guard leaked into a child process; output:\n{}",
+        String::from_utf8_lossy(&accum)
+    );
+
+    let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Like `wait_for_bytes`, answering the terminal queries modern fish blocks
+/// on before drawing its first prompt.
+fn wait_answering_queries(
+    writer: &mut dyn Write,
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    accum: &mut Vec<u8>,
+    needle: &[u8],
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while find_bytes(accum, needle).is_none() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(50)) {
+            for (query, reply) in [
+                (&b"\x1b[0c"[..], &b"\x1b[?1;2c"[..]),
+                (b"\x1b[?u", b"\x1b[?0u"),
+            ] {
+                if find_bytes(&chunk, query).is_some() {
+                    writer.write_all(reply).unwrap();
+                    writer.flush().unwrap();
+                }
+            }
+            accum.extend_from_slice(&chunk);
+        }
+    }
+    true
+}
+
+#[test]
+fn integrations_report_cwd_first_and_keep_their_guard_local() {
+    for shell in ["bash", "zsh", "fish"] {
+        assert_integration_contract(shell);
+    }
 }
 
 #[test]
 fn detector_picks_up_real_shell_markers() {
     // Same setup as above, but feed bytes through cmdq's actual Detector.
-    let bash = std::path::Path::new("/bin/bash");
-    if !bash.exists() {
-        return;
-    }
 
     let integration_path = write_temp_integration();
     let rcfile = integration_path.parent().unwrap().join("bashrc-detector");
@@ -342,11 +416,6 @@ fn detector_picks_up_real_shell_markers() {
 
 #[test]
 fn bash_integration_preserves_existing_debug_trap() {
-    let bash = std::path::Path::new("/bin/bash");
-    if !bash.exists() {
-        return;
-    }
-
     let integration_path = write_temp_integration();
     let dir = integration_path.parent().unwrap();
     let debug_log = dir.join("debug-trap.log");
@@ -428,11 +497,6 @@ fn bash_integration_preserves_existing_debug_trap() {
 
 #[test]
 fn bash_integration_preserves_prompt_command_array_shape() {
-    let bash = std::path::Path::new("/bin/bash");
-    if !bash.exists() {
-        return;
-    }
-
     let integration_path = write_temp_integration();
     let script = format!(
         "PROMPT_COMMAND=('printf user-one' 'printf user-two'); \
@@ -442,7 +506,10 @@ fn bash_integration_preserves_prompt_command_array_shape() {
         shell_quote(&integration_path.to_string_lossy())
     );
 
-    let output = Command::new(bash).args(["-lc", &script]).output().unwrap();
+    let output = Command::new("/bin/bash")
+        .args(["-lc", &script])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "bash failed: stdout={} stderr={}",

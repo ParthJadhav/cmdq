@@ -79,14 +79,6 @@ impl Detector {
         self.params.clear();
     }
 
-    /// Feed a chunk of bytes; returns events detected within them.
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
-        self.feed_with_offsets(bytes)
-            .into_iter()
-            .map(|ev| ev.kind)
-            .collect()
-    }
-
     /// Feed a chunk of bytes; returns detected events with byte offsets into
     /// the current chunk. `start` points to the ESC byte when the whole mode
     /// sequence appeared in this chunk; for sequences split across chunks it
@@ -99,8 +91,6 @@ impl Detector {
         let mut idx = 0;
         while idx < bytes.len() {
             if matches!(self.state, State::Normal) {
-                // Plain text is the common case: jump straight to the next
-                // escape instead of stepping the state machine per byte.
                 match bytes[idx..].iter().position(|&b| b == 0x1B) {
                     Some(offset) => idx += offset,
                     None => break,
@@ -155,9 +145,6 @@ impl Detector {
                     self.sequence_start = Some(idx);
                     State::AfterEsc
                 }
-                // Any other byte means this CSI isn't a private mode set/reset
-                // (or the parser would need to track parameters / intermediates).
-                // We don't care — bail back to ground.
                 _ => {
                     self.sequence_start = None;
                     State::Normal
@@ -243,9 +230,6 @@ impl Detector {
                     self.sequence_start = Some(idx);
                     State::AfterEsc
                 }
-                // Any other byte → abandon: this isn't a mode set/reset we
-                // recognize. (e.g. `\x1b[?25h` for cursor visibility — same
-                // shape, not interesting.)
                 _ => {
                     self.params.clear();
                     self.sequence_start = None;
@@ -335,6 +319,15 @@ mod heapless_digits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Detector {
+        fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
+            self.feed_with_offsets(bytes)
+                .into_iter()
+                .map(|ev| ev.kind)
+                .collect()
+        }
+    }
 
     #[test]
     fn oversized_modes_are_streamed_without_truncated_mode_events() {

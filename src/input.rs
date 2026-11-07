@@ -4,6 +4,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::queue::Queue;
+use crate::text_edit;
 
 /// What the app should do in response to a key, while the queue panel owns
 /// keystrokes.
@@ -12,34 +13,24 @@ pub enum InputAction {
     Nothing,
     CompletionUnavailable,
     FinishEditFirst,
-    /// Forward these raw bytes to the PTY (ie. send to the running child).
     ForwardToChild(Vec<u8>),
-    /// Enqueue a new command (committed from the input buffer).
     EnqueueCurrent {
         command: String,
         conditional: bool,
     },
-    /// Commit an edit on the queue item at the given index.
     CommitEdit {
         index: usize,
         command: String,
         conditional: bool,
     },
-    /// Cancel the current edit (without removing the item).
     CancelEdit,
-    /// Remove the item being edited.
     DeleteEdited,
-    /// Move the edited item up by one position.
     MoveEditedUp,
-    /// Move the edited item down by one position.
     MoveEditedDown,
-    /// Toggle the queue paused/running state.
     TogglePause,
-    /// Clear the entire queue.
     ClearQueue,
     /// Toggle "force queue mode" (capture even at prompt).
     ToggleForceQueue,
-    /// Show the help overlay.
     ToggleHelp,
     /// Toggle the chain ("conditional") flag on the in-progress draft/edit.
     /// `now_on` is the new state of the flag after the toggle.
@@ -54,7 +45,6 @@ pub struct LineEditor {
     pub cursor: usize,
     /// If Some, we are editing the queue item at this index; Enter commits.
     pub editing_index: Option<usize>,
-    /// Conditional flag for the in-progress draft / edit.
     pub conditional: bool,
     saved_draft: Option<(String, usize, bool)>,
 }
@@ -93,140 +83,38 @@ impl LineEditor {
         self.conditional = conditional;
     }
 
-    fn prev_boundary(&self) -> usize {
-        self.buffer[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self) -> usize {
-        self.buffer[self.cursor..]
-            .char_indices()
-            .nth(1)
-            .map(|(i, _)| self.cursor + i)
-            .unwrap_or(self.buffer.len())
-    }
-
     fn insert_char(&mut self, c: char) {
-        self.buffer.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        text_edit::insert_char(&mut self.buffer, &mut self.cursor, c);
     }
 
     pub fn insert_str(&mut self, s: &str) {
-        self.buffer.insert_str(self.cursor, s);
-        self.cursor += s.len();
+        text_edit::insert_str(&mut self.buffer, &mut self.cursor, s);
     }
 
     fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = self.prev_boundary();
-        self.buffer.replace_range(prev..self.cursor, "");
-        self.cursor = prev;
+        text_edit::backspace(&mut self.buffer, &mut self.cursor);
     }
 
     fn delete_at_cursor(&mut self) {
-        if self.cursor >= self.buffer.len() {
-            return;
-        }
-        let next = self.next_boundary();
-        self.buffer.replace_range(self.cursor..next, "");
-    }
-
-    fn delete_previous_word(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let start = self.previous_word_start();
-        self.buffer.replace_range(start..self.cursor, "");
-        self.cursor = start;
-    }
-
-    fn previous_word_start(&self) -> usize {
-        let mut start = self.cursor;
-        while start > 0 {
-            let prev = self.buffer[..start]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let ch = self.buffer[prev..start].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            start = prev;
-        }
-        while start > 0 {
-            let prev = self.buffer[..start]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let ch = self.buffer[prev..start].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            start = prev;
-        }
-        start
-    }
-
-    fn next_word_end(&self) -> usize {
-        let mut end = self.cursor;
-        while end < self.buffer.len() {
-            let next = self.buffer[end..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| end + i)
-                .unwrap_or(self.buffer.len());
-            let ch = self.buffer[end..next].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            end = next;
-        }
-        while end < self.buffer.len() {
-            let next = self.buffer[end..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| end + i)
-                .unwrap_or(self.buffer.len());
-            let ch = self.buffer[end..next].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            end = next;
-        }
-        end
+        text_edit::delete_at_cursor(&mut self.buffer, self.cursor);
     }
 
     fn move_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        self.cursor = self.prev_boundary();
+        self.cursor = text_edit::prev_boundary(&self.buffer, self.cursor);
     }
 
     fn move_right(&mut self) {
-        if self.cursor >= self.buffer.len() {
-            return;
-        }
-        self.cursor = self.next_boundary();
+        self.cursor = text_edit::next_boundary(&self.buffer, self.cursor);
     }
 
     fn move_word_left(&mut self) {
-        self.cursor = self.previous_word_start();
+        self.cursor = text_edit::previous_word_start(&self.buffer, self.cursor);
     }
 
     fn move_word_right(&mut self) {
-        self.cursor = self.next_word_end();
+        self.cursor = text_edit::next_word_end(&self.buffer, self.cursor);
     }
 
-    /// Translate a key event into an InputAction. `queue` is consulted only
-    /// for navigation (Up/Down) — does not mutate it.
     pub fn handle_key(&mut self, key: KeyEvent, queue: &Queue) -> InputAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -278,13 +166,11 @@ impl LineEditor {
                     InputAction::Nothing
                 }
                 'u' | 'U' => {
-                    // Kill back-to-start.
-                    self.buffer.replace_range(..self.cursor, "");
-                    self.cursor = 0;
+                    text_edit::kill_to_start(&mut self.buffer, &mut self.cursor);
                     InputAction::Nothing
                 }
                 'w' | 'W' => {
-                    self.delete_previous_word();
+                    text_edit::delete_previous_word(&mut self.buffer, &mut self.cursor);
                     InputAction::Nothing
                 }
                 _ => InputAction::Nothing,

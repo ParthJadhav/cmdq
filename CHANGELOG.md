@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+Breaking for the `cmdq` library crate (the CLI is unchanged), so the next
+release must be 0.5.0 or later:
+
+- Removed `app::run`, `app::run_with_exit_status`, `queue::default_path` and
+  `Queue::pop_next_eligible`; removed `SessionLease::path`.
+- `cursor_tracker`, `input`, `mode_detect`, `panel` and `pty` are no longer
+  public, and neither are `shell_integration::{rc_file_for,
+  integration_script_path}` or `config::default_path`.
+
+### Fixed
+
+- Session-lease peer counting ignores other sessions' in-flight temp files, so
+  a session is no longer counted twice or has its temp file removed as stale.
+- Bash's prompt-size reassert after a command runs after dispatch, so the shell
+  never sees an extra panel-height resize while it reads a queued command.
+
 ## 0.4.1
 
 ### Fixed

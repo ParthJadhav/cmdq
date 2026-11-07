@@ -19,10 +19,6 @@ fn cmdq_binary_path() -> std::path::PathBuf {
 #[test]
 fn cli_help_and_version_surface_public_flags() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        eprintln!("cmdq binary not built; skipping ({})", bin.display());
-        return;
-    }
 
     let help = Command::new(&bin).arg("--help").output().unwrap();
     assert!(
@@ -51,9 +47,6 @@ fn cli_help_and_version_surface_public_flags() {
 #[test]
 fn cli_prints_effective_config_with_environment_overrides() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.toml");
     std::fs::write(&path, "[panel]\ndelay_ms = 2500\nmax_rows = 5\n").unwrap();
@@ -78,14 +71,7 @@ fn cli_prints_effective_config_with_environment_overrides() {
 
 #[test]
 fn binary_starts_and_exits_cleanly_with_bash() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        eprintln!("cmdq binary not built; skipping ({})", bin.display());
-        return;
-    }
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -171,13 +157,7 @@ fn binary_starts_and_exits_cleanly_with_bash() {
 
 #[test]
 fn binary_normal_exit_removes_session_lease() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-lease-normal-exit-{}-{}",
@@ -259,13 +239,7 @@ fn binary_normal_exit_removes_session_lease() {
 
 #[test]
 fn binary_sigterm_removes_session_lease() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-lease-sigterm-{}-{}",
@@ -352,9 +326,6 @@ fn binary_sigterm_removes_session_lease() {
 #[test]
 fn cli_install_integration_uses_temp_home_and_xdg_data_home() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-cli-install-{}-{}",
@@ -395,9 +366,6 @@ fn cli_install_integration_uses_temp_home_and_xdg_data_home() {
 #[test]
 fn cli_install_integration_uses_absolute_zdotdir_for_zsh() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-cli-install-zdotdir-{}-{}",
@@ -448,9 +416,6 @@ fn zsh_auto_integration_sources_absolute_zdotdir_zshrc() {
         return;
     }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-zdotdir-smoke-{}-{}",
@@ -536,9 +501,6 @@ fn zsh_auto_integration_survives_zshenv_repointing_zdotdir() {
         return;
     };
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-zshenv-repoint-{}-{}",
@@ -622,9 +584,6 @@ fn zsh_auto_integration_survives_zshenv_repointing_zdotdir() {
 #[test]
 fn cli_install_integration_ignores_relative_xdg_data_home() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-cli-install-relative-xdg-{}-{}",
@@ -668,9 +627,6 @@ fn cli_install_integration_ignores_relative_xdg_data_home() {
 #[test]
 fn cli_install_integration_preserves_invalid_utf8_rc() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-cli-install-invalid-{}-{}",
@@ -712,9 +668,6 @@ fn cli_install_integration_preserves_invalid_utf8_rc() {
 #[test]
 fn cli_install_integration_refreshes_existing_managed_block() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-cli-install-refresh-{}-{}",
@@ -770,9 +723,6 @@ fn cli_install_integration_preserves_symlinked_rc_file() {
     use std::os::unix::fs::symlink;
 
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-cli-install-symlink-{}-{}",
@@ -822,9 +772,6 @@ fn cli_install_integration_preserves_symlinked_rc_file() {
 #[test]
 fn cli_print_integration_sh_fails_loudly() {
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let output = Command::new(bin)
         .args(["--print-integration", "sh"])
@@ -844,13 +791,7 @@ fn cli_print_integration_sh_fails_loudly() {
 
 #[test]
 fn binary_queues_command_via_force_queue_then_dispatches() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     // Set up a custom HOME with our integration sourced from .bashrc, so the
     // shell inside cmdq emits OSC 133 markers reliably regardless of the
@@ -906,19 +847,15 @@ fn binary_queues_command_via_force_queue_then_dispatches() {
         }
     });
 
-    // Wait for startup.
+    // Wait for the shell's first prompt marker, i.e. its rc is sourced.
     let mut accum = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if let Ok(b) = rx.recv_timeout(Duration::from_millis(200)) {
-            accum.extend_from_slice(&b);
-        }
-        if accum.len() > 64 {
-            break;
-        }
-    }
-    // Give the inner shell a moment to source rc.
-    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_for(&rx, &mut accum, Duration::from_secs(5), |s| s
+            .windows(b"\x1b]133;A".len())
+            .any(|w| w == b"\x1b]133;A")),
+        "force-queue smoke never saw a shell prompt; output:\n{}",
+        String::from_utf8_lossy(&accum)
+    );
 
     // Press Ctrl-Q to enter force-queue mode (so we capture even at prompt).
     writer.write_all(&[0x11]).unwrap(); // Ctrl-Q
@@ -987,13 +924,7 @@ fn binary_queues_command_via_force_queue_then_dispatches() {
 
 #[test]
 fn binary_prompt_ctrl_w_edit_runs_edited_command() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-prompt-edit-{}-{}",
@@ -1077,13 +1008,7 @@ fn binary_prompt_ctrl_w_edit_runs_edited_command() {
 
 #[test]
 fn binary_panel_ctrl_line_editing_runs_edited_queue_item() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-panel-edit-{}-{}",
@@ -1188,13 +1113,7 @@ fn binary_panel_ctrl_line_editing_runs_edited_queue_item() {
 
 #[test]
 fn binary_prompt_alt_edit_fast_followup_queues_next_command() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-alt-fast-followup-{}-{}",
@@ -1302,13 +1221,7 @@ fn binary_prompt_alt_edit_fast_followup_queues_next_command() {
 
 #[test]
 fn binary_prompt_newline_paste_fast_followup_queues_next_command() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-paste-fast-followup-{}-{}",
@@ -1418,13 +1331,7 @@ fn binary_prompt_newline_paste_fast_followup_queues_next_command() {
 
 #[test]
 fn binary_leading_noop_paste_fast_followup_queues_next_command() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-leading-noop-paste-{}-{}",
@@ -1534,13 +1441,7 @@ fn binary_leading_noop_paste_fast_followup_queues_next_command() {
 
 #[test]
 fn binary_esc_clear_then_esc_stays_in_queue_editor() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-esc-clear-{}-{}",
@@ -1652,13 +1553,7 @@ fn binary_esc_clear_then_esc_stays_in_queue_editor() {
 
 #[test]
 fn binary_queue_does_not_dispatch_item_being_edited() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-edit-freeze-{}-{}",
@@ -1695,6 +1590,9 @@ fn binary_queue_does_not_dispatch_item_being_edited() {
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", &home);
     cmd.env("XDG_DATA_HOME", &xdg);
+    // A short panel delay leaves a wide window between "panel open" and
+    // "command finished" for the edit below, instead of racing a 300ms gap.
+    cmd.env("CMDQ_PANEL_DELAY_MS", "200");
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
@@ -1738,7 +1636,7 @@ fn binary_queue_does_not_dispatch_item_being_edited() {
         .write_all(b"sleep 2; echo EDIT_FREEZE_TRIGGER\r")
         .unwrap();
     writer.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(1700));
+    std::thread::sleep(Duration::from_millis(800));
     writer.write_all(b"\x1b[A").unwrap(); // Start editing queued item while command is running.
     writer.flush().unwrap();
 
@@ -1782,13 +1680,7 @@ fn binary_queue_does_not_dispatch_item_being_edited() {
 
 #[test]
 fn binary_multiline_paste_preserves_heredoc_queue_item() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-heredoc-paste-{}-{}",
@@ -1889,13 +1781,7 @@ fn binary_multiline_paste_preserves_heredoc_queue_item() {
 
 #[test]
 fn running_read_prompt_receives_input_instead_of_queue_capture() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-read-prompt-{}-{}",
@@ -1991,13 +1877,7 @@ fn running_read_prompt_receives_input_instead_of_queue_capture() {
 
 #[test]
 fn running_press_enter_prompt_receives_enter_instead_of_queue_capture() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-press-enter-prompt-{}-{}",
@@ -2091,13 +1971,7 @@ fn running_press_enter_prompt_receives_enter_instead_of_queue_capture() {
 
 #[test]
 fn running_press_any_key_prompt_releases_after_single_key_answer() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-press-any-key-prompt-{}-{}",
@@ -2223,13 +2097,7 @@ fn running_press_any_key_prompt_releases_after_single_key_answer() {
 
 #[test]
 fn running_read_prompt_receives_paste_instead_of_queue_capture() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-read-paste-{}-{}",
@@ -2330,13 +2198,7 @@ fn running_read_prompt_receives_paste_instead_of_queue_capture() {
 
 #[test]
 fn multiline_if_continuation_stays_with_shell_after_panel_delay() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-if-continuation-{}-{}",
@@ -2433,13 +2295,7 @@ fn multiline_if_continuation_stays_with_shell_after_panel_delay() {
 
 #[test]
 fn binary_auto_installs_bash_integration_for_clean_home() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     // No .bashrc and no pre-installed cmdq block. cmdq should still launch
     // bash with its generated rcfile so OSC 133 markers drive dispatch.
@@ -2554,13 +2410,7 @@ fn binary_auto_installs_bash_integration_for_clean_home() {
 
 #[test]
 fn bash_auto_integration_sources_bash_profile_when_bashrc_absent() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-bash-profile-{}-{}",
@@ -2656,9 +2506,6 @@ fn binary_auto_installs_zsh_integration_for_clean_home() {
         return;
     };
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-clean-zsh-{}-{}",
@@ -2745,9 +2592,6 @@ fn binary_auto_installs_fish_integration_for_clean_home() {
         return;
     };
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-clean-fish-{}-{}",
@@ -2828,13 +2672,7 @@ fn binary_auto_installs_fish_integration_for_clean_home() {
 
 #[test]
 fn queued_command_origin_tracks_inner_shell_cd() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-inner-cwd-{}-{}",
@@ -2938,13 +2776,7 @@ fn queued_command_origin_tracks_inner_shell_cd() {
 
 #[test]
 fn queued_command_pauses_after_shell_cd_before_auto_dispatch() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-cwd-auto-pause-{}-{}",
@@ -3057,13 +2889,7 @@ fn queued_command_pauses_after_shell_cd_before_auto_dispatch() {
 
 #[test]
 fn queued_command_origin_handles_literal_percent_in_cwd() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-percent-cwd-{}-{}",
@@ -3154,13 +2980,7 @@ fn queued_command_origin_handles_literal_percent_in_cwd() {
 
 #[test]
 fn queued_command_origin_handles_bel_in_cwd() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-bel-cwd-{}-{}",
@@ -3255,13 +3075,7 @@ fn queued_command_origin_handles_bel_in_cwd() {
 
 #[test]
 fn corrupt_legacy_queue_is_ignored_and_left_untouched() {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-corrupt-queue-{}-{}",
@@ -3354,13 +3168,7 @@ fn bash_prompt_resize_cannot_shrink_queued_command() {
 }
 
 fn assert_queued_command_uses_full_height(bashrc: &str) {
-    if !std::path::Path::new("/bin/bash").exists() {
-        return;
-    }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-stty-{}-{}",
@@ -3455,9 +3263,6 @@ fn binary_queue_flow_works_inside_tmux_when_available() {
         return;
     }
     let bin = cmdq_binary_path();
-    if !bin.exists() {
-        return;
-    }
 
     let tmp = std::env::temp_dir().join(format!(
         "cmdq-tmux-{}-{}",
