@@ -34,6 +34,23 @@ use crate::queue::Queue;
 /// what fits above the bottom edge.
 const HELP_MAX_ROWS: u16 = 29;
 
+/// What a status message is, so the panel can decide whether it needs its
+/// own notice row without parsing the wording.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum StatusKind {
+    /// Actionable feedback: shown on its own row.
+    #[default]
+    Notice,
+    /// Confirms a routine action the queue or header already shows.
+    Routine,
+    /// An outcome that `activity` also records; the activity line wins.
+    Outcome,
+    /// The queue was paused; the header already says so.
+    Paused,
+    /// Asks for a confirming second key press.
+    Confirmation,
+}
+
 /// Snapshot of the cmdq state the panel needs to render itself. Borrowed
 /// per-frame; no allocation in the hot path beyond what crossterm does.
 pub struct PanelState<'a> {
@@ -50,6 +67,7 @@ pub struct PanelState<'a> {
     pub activity: Option<&'a str>,
     pub can_recover: bool,
     pub status: &'a str,
+    pub status_kind: StatusKind,
     pub pending_quit: bool,
     pub pending_clear: bool,
     pub show_help: bool,
@@ -64,33 +82,19 @@ fn panel_notice<'a>(view: &'a PanelState<'_>) -> Option<&'a str> {
         && !view.passthrough_to_child
         && !view.child_input_prompt
         && view.editing_index.is_none()
-        && matches!(
-            view.status,
-            "queue paused" | "queue paused by another session"
-        )
+        && view.status_kind == StatusKind::Paused
     {
         return view.activity;
     }
     if view.pending_clear || view.pending_quit {
         return None;
     }
-    let routine = [
-        "added:",
-        "saved:",
-        "dispatched:",
-        "queue resumed",
-        "Building queue",
-        "Typing into",
-        "alt-screen",
-        "mouse tracking",
-        "edit cancelled",
-    ]
-    .iter()
-    .any(|prefix| view.status.starts_with(prefix));
-    let outcome_in_activity = view.activity.is_some()
-        && (view.status.starts_with("removed:")
-            || matches!(view.status, "queue cleared" | "restored to paused queue"));
-    if !view.status.is_empty() && !routine && !outcome_in_activity {
+    let explained = match view.status_kind {
+        StatusKind::Routine => true,
+        StatusKind::Outcome => view.activity.is_some(),
+        StatusKind::Notice | StatusKind::Paused | StatusKind::Confirmation => false,
+    };
+    if !view.status.is_empty() && !explained {
         Some(view.status)
     } else {
         view.activity
@@ -1034,6 +1038,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1071,6 +1076,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "added: echo 界🙂",
+            status_kind: StatusKind::Routine,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1104,6 +1110,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1137,6 +1144,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1169,6 +1177,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1206,6 +1215,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1230,6 +1240,7 @@ mod tests {
             activity: None,
             can_recover: false,
             status: "",
+            status_kind: StatusKind::Notice,
             pending_quit: false,
             pending_clear: false,
             show_help: false,
@@ -1254,6 +1265,7 @@ mod tests {
 
         view.editing_index = Some(11);
         view.status = "saved: cmd 11";
+        view.status_kind = StatusKind::Routine;
         let mut out = Vec::new();
         paint_header(&mut out, &view, 100, 8).unwrap();
         let printable = strip_ansi(&String::from_utf8_lossy(&out));
@@ -1336,6 +1348,7 @@ mod tests {
         queue.paused = true;
         let mut view = view_with(&queue, true);
         view.status = "queue paused by another session";
+        view.status_kind = StatusKind::Paused;
         let height = panel_height(&view, 30);
         assert_eq!(height, 4);
         let mut out = Vec::new();
@@ -1352,10 +1365,12 @@ mod tests {
         let mut view = view_with(&queue, true);
         for status in ["added: ls", "saved: ls", "dispatched: ls", "queue resumed"] {
             view.status = status;
+            view.status_kind = StatusKind::Routine;
             assert_eq!(panel_height(&view, 30), 3);
             assert!(panel_notice(&view).is_none());
         }
         view.status = "queue save failed: disk full";
+        view.status_kind = StatusKind::Notice;
         assert_eq!(panel_notice(&view), Some(view.status));
         let mut out = Vec::new();
         paint(&mut out, &view, 4, 30, 80, true, (0, 0)).unwrap();
@@ -1364,6 +1379,7 @@ mod tests {
         view.status = "queue cleared by another session";
         assert_eq!(panel_notice(&view), Some(view.status));
         view.status = "removed: ls";
+        view.status_kind = StatusKind::Outcome;
         view.activity = Some("Removed ls — Alt-U restores paused");
         assert_eq!(panel_notice(&view), view.activity);
     }
