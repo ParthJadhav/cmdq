@@ -9,9 +9,10 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+
+use crate::atomic_file::{self, Access};
 
 const ZSH_SNIPPET: &str = include_str!("../shell/integration.zsh");
 const BASH_SNIPPET: &str = include_str!("../shell/integration.bash");
@@ -19,7 +20,6 @@ const FISH_SNIPPET: &str = include_str!("../shell/integration.fish");
 
 const RC_BLOCK_BEGIN: &str = "# >>> cmdq shell integration >>>";
 const RC_BLOCK_END: &str = "# <<< cmdq shell integration <<<";
-static FILE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellKind {
@@ -122,14 +122,14 @@ pub fn integration_script_path(shell: ShellKind) -> Result<PathBuf> {
     }))
 }
 
-pub(crate) fn data_dir() -> Result<PathBuf> {
+fn data_dir() -> Result<PathBuf> {
     crate::paths::data_dir().ok_or_else(|| anyhow!("could not locate home/data dir"))
 }
 
 /// Write the integration snippet to `~/.local/share/cmdq/integration.<shell>`.
 pub fn write_integration_script(shell: ShellKind) -> Result<PathBuf> {
     let path = integration_script_path(shell)?;
-    write_file_atomic(&path, shell.snippet()?.as_bytes())?;
+    atomic_file::write(&path, shell.snippet()?.as_bytes(), Access::Inherit)?;
     Ok(path)
 }
 
@@ -232,33 +232,7 @@ fn read_rc_utf8_or_empty(path: &Path) -> Result<String> {
 
 fn write_rc_atomic(path: &Path, contents: &str) -> Result<()> {
     let write_path = writable_rc_path(path)?;
-    write_file_atomic(&write_path, contents.as_bytes())
-}
-
-pub(crate) fn write_file_atomic(path: &Path, contents: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
-    let tmp_name = format!(
-        ".{file_name}.cmdq-tmp-{}-{}",
-        std::process::id(),
-        monotonic_suffix()
-    );
-    let tmp = path.with_file_name(tmp_name);
-    std::fs::write(&tmp, contents)
-        .with_context(|| format!("writing temp file {}", tmp.display()))?;
-    if let Ok(meta) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e).with_context(|| format!("renaming temp file into {}", path.display()))
-        }
-    }
+    atomic_file::write(&write_path, contents.as_bytes(), Access::Inherit)
 }
 
 fn writable_rc_path(path: &Path) -> Result<PathBuf> {
@@ -289,15 +263,6 @@ fn writable_rc_path(path: &Path) -> Result<PathBuf> {
         };
     }
     Err(anyhow!("too many symlinks resolving {}", path.display()))
-}
-
-fn monotonic_suffix() -> u128 {
-    let counter = FILE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    nanos.saturating_mul(1000) + u128::from(counter)
 }
 
 pub(crate) fn shell_single_quote(path: &Path) -> String {
@@ -427,23 +392,6 @@ mod tests {
         assert!(rc_file_for(ShellKind::Sh).is_none());
     }
 
-    #[test]
-    fn write_file_atomic_creates_parent_and_leaves_no_temp_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("nested").join("integration.bash");
-
-        write_file_atomic(&path, b"source me\n").unwrap();
-
-        assert_eq!(std::fs::read(&path).unwrap(), b"source me\n");
-        let parent = path.parent().unwrap();
-        let temp_files = std::fs::read_dir(parent)
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".cmdq-tmp-"))
-            .count();
-        assert_eq!(temp_files, 0);
-    }
-
     #[cfg(unix)]
     #[test]
     fn rc_write_preserves_a_chain_with_a_missing_final_target() {
@@ -457,31 +405,5 @@ mod tests {
         assert!(rc.is_symlink());
         assert!(middle.is_symlink());
         assert_eq!(std::fs::read_to_string(target).unwrap(), "# config\n");
-    }
-
-    #[test]
-    fn concurrent_atomic_writes_leave_one_complete_payload() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("integration.bash");
-        let first = b"first\n".repeat(16_384);
-        let second = b"second\n".repeat(16_384);
-
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                let path = path.clone();
-                let first = first.clone();
-                let second = second.clone();
-                scope.spawn(move || {
-                    write_file_atomic(&path, &first).unwrap();
-                    write_file_atomic(&path, &second).unwrap();
-                });
-            }
-        });
-
-        let final_contents = std::fs::read(&path).unwrap();
-        assert!(
-            final_contents == first || final_contents == second,
-            "final file contained a partial or mixed payload"
-        );
     }
 }

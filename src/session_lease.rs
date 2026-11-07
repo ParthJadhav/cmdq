@@ -5,6 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file::{self, Access};
+
 const LEASE_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
@@ -53,7 +55,7 @@ impl SessionLease {
         let path = dir.join(format!(
             "session-{}-{}.json",
             std::process::id(),
-            monotonic_suffix()
+            atomic_file::unique_suffix()
         ));
         let mut lease = Self {
             path,
@@ -128,38 +130,13 @@ fn lease_dir(queue_path: &Path) -> Result<PathBuf> {
 }
 
 fn write_record_atomic(path: &Path, record: &LeaseRecord) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating session lease dir {}", parent.display()))?;
-    }
-    let tmp = path.with_file_name(format!(
-        ".{}.tmp-{}-{}",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("lease"),
-        std::process::id(),
-        monotonic_suffix()
-    ));
-    let data = serde_json::to_vec(record)?;
-    std::fs::write(&tmp, data).with_context(|| format!("writing {}", tmp.display()))?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))
-        }
-    }
+    atomic_file::write(path, &serde_json::to_vec(record)?, Access::Inherit)
 }
 
 fn now_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-fn monotonic_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
         .unwrap_or(0)
 }
 

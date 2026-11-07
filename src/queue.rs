@@ -13,13 +13,15 @@
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+
+use crate::atomic_file::{self, Access};
 
 const STALE_QUEUE_DIR_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const EMPTY_QUEUE_DIR_GRACE: Duration = Duration::from_secs(60);
@@ -408,36 +410,8 @@ impl Queue {
     }
 
     fn save_snapshot_unlocked(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating queue parent dir {}", parent.display()))?;
-        }
-        let tmp = unique_temp_path(path);
-        let data = serde_json::to_vec(self)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // Queued command arguments can contain credentials. Keep both
-            // the temporary file and the final snapshot private to its owner.
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&tmp)
-            .with_context(|| format!("creating temp file {}", tmp.display()))?;
-        if let Err(error) = file.write_all(&data) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error).with_context(|| format!("writing temp file {}", tmp.display()));
-        }
-        drop(file);
-        match std::fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))
-            }
-        }
+        // Queued command arguments can contain credentials.
+        atomic_file::write(path, &serde_json::to_vec(self)?, Access::Private)
     }
 
     fn merge_disk_snapshot_unlocked(
@@ -671,16 +645,6 @@ impl Queue {
     }
 }
 
-fn unique_temp_path(path: &Path) -> PathBuf {
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("queue");
-    let tmp_name = format!(
-        ".{file_name}.tmp-{}-{}",
-        std::process::id(),
-        monotonic_suffix()
-    );
-    path.with_file_name(tmp_name)
-}
-
 fn next_available_id(used: &mut HashSet<u64>, next_id: &mut u64) -> u64 {
     loop {
         let candidate = *next_id;
@@ -745,16 +709,9 @@ impl PushQueueItemUnique for Vec<QueueItem> {
     }
 }
 
-fn monotonic_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
 fn preserve_corrupt_file(path: &Path) -> std::io::Result<PathBuf> {
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("queue");
-    let backup_name = format!("{file_name}.corrupt-{}", monotonic_suffix());
+    let backup_name = format!("{file_name}.corrupt-{}", atomic_file::unix_nanos());
     let backup = path.with_file_name(backup_name);
     std::fs::rename(path, &backup)?;
     Ok(backup)

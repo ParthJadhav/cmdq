@@ -9,18 +9,16 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
+use crate::atomic_file::{self, Access};
 use crate::shell_integration::{
-    ShellKind, data_dir, shell_single_quote, write_file_atomic, write_integration_script,
-    zsh_dot_dir,
+    ShellKind, shell_single_quote, write_integration_script, zsh_dot_dir,
 };
 
-static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const STALE_SESSION_DIR_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct ShellPty {
@@ -206,7 +204,7 @@ fn prepare_bash_rcfile(script: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
     let content = format!(
         "if [ -f {real_bashrc_q} ]; then\n  . {real_bashrc_q}\nelif [ -f {real_bash_profile_q} ]; then\n  . {real_bash_profile_q}\nelif [ -f {real_bash_login_q} ]; then\n  . {real_bash_login_q}\nelif [ -f {real_profile_q} ]; then\n  . {real_profile_q}\nfi\n[ -f {script_q} ] && . {script_q}\n"
     );
-    write_file_atomic(&rcfile, content.as_bytes()).ok()?;
+    atomic_file::write(&rcfile, content.as_bytes(), Access::Inherit).ok()?;
     Some((rcfile, session_dir))
 }
 
@@ -232,7 +230,7 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
          export _CMDQ_SYNTHETIC_ZDOTDIR _CMDQ_USER_ZDOTDIR\n\
          export ZDOTDIR=\"$_CMDQ_SYNTHETIC_ZDOTDIR\"\n"
     );
-    write_file_atomic(&zdotdir.join(".zshenv"), zshenv.as_bytes()).ok()?;
+    atomic_file::write(&zdotdir.join(".zshenv"), zshenv.as_bytes(), Access::Inherit).ok()?;
 
     // Source the user's file at top level, never from inside a function:
     // `typeset -U path PATH` or `typeset -U fpath` at the top of a zshrc
@@ -252,7 +250,7 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
             let script_q = shell_single_quote(script);
             content.push_str(&format!("[ -f {script_q} ] && source {script_q}\n"));
         }
-        write_file_atomic(dest, content.as_bytes()).ok()
+        atomic_file::write(dest, content.as_bytes(), Access::Inherit).ok()
     };
 
     mk(&zdotdir.join(".zprofile"), ".zprofile", false)?;
@@ -264,14 +262,14 @@ fn prepare_zdotdir(script: &std::path::Path) -> Option<PathBuf> {
 }
 
 fn prepare_session_dir(prefix: &str) -> Option<PathBuf> {
-    let base = data_dir().ok()?.join("cmdq").join("sessions");
+    let base = crate::paths::data_dir()?.join("cmdq").join("sessions");
     std::fs::create_dir_all(&base).ok()?;
     cleanup_stale_session_dirs(&base);
     for attempt in 0..100 {
         let dir = base.join(format!(
             "{prefix}-{}-{}-{}",
             std::process::id(),
-            monotonic_session_suffix(),
+            atomic_file::unique_suffix(),
             attempt
         ));
         match std::fs::create_dir(&dir) {
@@ -284,7 +282,7 @@ fn prepare_session_dir(prefix: &str) -> Option<PathBuf> {
 }
 
 fn cleanup_stale_session_dirs(base: &Path) {
-    cleanup_stale_session_dirs_at(base, unix_nanos());
+    cleanup_stale_session_dirs_at(base, atomic_file::unix_nanos());
 }
 
 fn cleanup_stale_session_dirs_at(base: &Path, now_nanos: u128) {
@@ -318,18 +316,6 @@ fn session_dir_created_nanos(name: &str) -> Option<u128> {
     let suffix = parts.next()?.parse::<u128>().ok()?;
     let _prefix_and_pid = parts.next()?;
     Some(suffix / 1000)
-}
-
-fn monotonic_session_suffix() -> u128 {
-    let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    unix_nanos().saturating_mul(1000) + u128::from(counter)
-}
-
-fn unix_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
