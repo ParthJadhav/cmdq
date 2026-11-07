@@ -40,7 +40,7 @@ first, then search the test names rather than reading the entire file.
 
 ```sh
 rg --files src shell tests docs .github
-rg -n 'dispatch_next_eligible|handle_osc_event' src/app.rs
+rg -n 'dispatch_next_eligible|handle_osc_event' src/app/lifecycle.rs
 rg -n 'conditional|rollback' tests src/queue.rs
 ```
 
