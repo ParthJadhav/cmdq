@@ -4,13 +4,13 @@
 pub mod app;
 mod atomic_file;
 pub mod config;
-pub mod cursor_tracker;
-pub mod input;
-pub mod mode_detect;
+mod cursor_tracker;
+mod input;
+mod mode_detect;
 pub mod osc133;
-pub mod panel;
+mod panel;
 pub(crate) mod paths;
-pub mod pty;
+mod pty;
 pub mod queue;
 pub mod session_lease;
 pub mod shell_integration;

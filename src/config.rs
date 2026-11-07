@@ -134,7 +134,7 @@ fn apply_env<T>(
     }
 }
 
-pub fn default_path() -> PathBuf {
+fn default_path() -> PathBuf {
     crate::paths::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("cmdq")

@@ -42,6 +42,11 @@ pub(crate) fn next_word_end(text: &str, cursor: usize) -> usize {
     end
 }
 
+pub(crate) fn insert_char(text: &mut String, cursor: &mut usize, c: char) {
+    text.insert(*cursor, c);
+    *cursor += c.len_utf8();
+}
+
 pub(crate) fn insert_str(text: &mut String, cursor: &mut usize, s: &str) {
     text.insert_str(*cursor, s);
     *cursor += s.len();

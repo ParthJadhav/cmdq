@@ -6,12 +6,12 @@ pub(crate) fn absolute_path(path: PathBuf) -> Option<PathBuf> {
 }
 
 pub(crate) fn xdg_data_home() -> Option<PathBuf> {
-    std::env::var_os("XDG_DATA_HOME").and_then(xdg_data_home_from_os)
+    std::env::var_os("XDG_DATA_HOME").and_then(absolute_dir_from_env)
 }
 
 pub(crate) fn config_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
-        .and_then(xdg_data_home_from_os)
+        .and_then(absolute_dir_from_env)
         .or_else(|| {
             dirs::home_dir()
                 .and_then(absolute_path)
@@ -19,7 +19,7 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
         })
 }
 
-pub(crate) fn xdg_data_home_from_os(dir: OsString) -> Option<PathBuf> {
+fn absolute_dir_from_env(dir: OsString) -> Option<PathBuf> {
     if dir.is_empty() {
         return None;
     }
@@ -39,8 +39,8 @@ mod tests {
 
     #[test]
     fn xdg_data_home_requires_absolute_path() {
-        assert_eq!(xdg_data_home_from_os(OsString::from("")), None);
-        assert_eq!(xdg_data_home_from_os(OsString::from("relative/path")), None);
+        assert_eq!(absolute_dir_from_env(OsString::from("")), None);
+        assert_eq!(absolute_dir_from_env(OsString::from("relative/path")), None);
 
         let absolute = if cfg!(windows) {
             OsString::from(r"C:\Users\me\AppData\Local")
@@ -48,7 +48,7 @@ mod tests {
             OsString::from("/tmp/cmdq-xdg")
         };
         assert_eq!(
-            xdg_data_home_from_os(absolute.clone()),
+            absolute_dir_from_env(absolute.clone()),
             Some(PathBuf::from(absolute))
         );
     }

@@ -79,14 +79,6 @@ impl Detector {
         self.params.clear();
     }
 
-    /// Feed a chunk of bytes; returns events detected within them.
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
-        self.feed_with_offsets(bytes)
-            .into_iter()
-            .map(|ev| ev.kind)
-            .collect()
-    }
-
     /// Feed a chunk of bytes; returns detected events with byte offsets into
     /// the current chunk. `start` points to the ESC byte when the whole mode
     /// sequence appeared in this chunk; for sequences split across chunks it
@@ -335,6 +327,15 @@ mod heapless_digits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Detector {
+        fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
+            self.feed_with_offsets(bytes)
+                .into_iter()
+                .map(|ev| ev.kind)
+                .collect()
+        }
+    }
 
     #[test]
     fn oversized_modes_are_streamed_without_truncated_mode_events() {

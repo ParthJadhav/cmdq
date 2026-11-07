@@ -95,8 +95,7 @@ impl LineEditor {
     }
 
     fn insert_char(&mut self, c: char) {
-        let mut buf = [0u8; 4];
-        text_edit::insert_str(&mut self.buffer, &mut self.cursor, c.encode_utf8(&mut buf));
+        text_edit::insert_char(&mut self.buffer, &mut self.cursor, c);
     }
 
     pub fn insert_str(&mut self, s: &str) {

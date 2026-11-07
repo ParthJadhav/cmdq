@@ -87,16 +87,11 @@ pub fn current_shell() -> Option<String> {
 }
 
 /// Path to the rc file we should install into for the given shell.
-pub fn rc_file_for(shell: ShellKind) -> Option<PathBuf> {
+fn rc_file_for(shell: ShellKind) -> Option<PathBuf> {
     Some(match shell {
         ShellKind::Zsh => zsh_dot_dir()?.join(".zshrc"),
         ShellKind::Bash => dirs::home_dir()?.join(".bashrc"),
-        ShellKind::Fish => std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .and_then(crate::paths::absolute_path)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))?
-            .join("fish")
-            .join("config.fish"),
+        ShellKind::Fish => crate::paths::config_dir()?.join("fish").join("config.fish"),
         ShellKind::Sh => return None,
     })
 }
@@ -111,7 +106,7 @@ pub(crate) fn zsh_dot_dir() -> Option<PathBuf> {
 
 /// Path under the user's data dir where we drop the integration script
 /// for `source`-ing from rc files.
-pub fn integration_script_path(shell: ShellKind) -> Result<PathBuf> {
+fn integration_script_path(shell: ShellKind) -> Result<PathBuf> {
     let dir = data_dir()?.join("cmdq");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir.join(match shell {

@@ -65,6 +65,11 @@ pub(crate) fn unique_suffix() -> u128 {
     unix_nanos().saturating_mul(1000) + u128::from(counter % 1000)
 }
 
+/// The wall-clock nanoseconds a [`unique_suffix`] was taken at.
+pub(crate) fn unique_suffix_nanos(suffix: u128) -> u128 {
+    suffix / 1000
+}
+
 pub(crate) fn unix_nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
