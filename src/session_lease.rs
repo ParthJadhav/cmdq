@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -10,6 +11,30 @@ const LEASE_TTL: Duration = Duration::from_secs(5);
 pub struct SessionLease {
     path: PathBuf,
     record: LeaseRecord,
+    /// Serializes refreshes against removal from a signal-handling thread.
+    io: Arc<Mutex<()>>,
+}
+
+/// Removes a lease's file from another thread when the process is about to
+/// exit, without racing a refresh that would recreate it.
+#[derive(Debug)]
+pub struct LeaseRemover {
+    path: PathBuf,
+    io: Arc<Mutex<()>>,
+}
+
+impl LeaseRemover {
+    /// Remove the lease file and block further refreshes until the process
+    /// exits.
+    pub fn remove_for_exit(self) {
+        let guard = lock(&self.io);
+        let _ = std::fs::remove_file(&self.path);
+        std::mem::forget(guard);
+    }
+}
+
+fn lock(io: &Mutex<()>) -> MutexGuard<'_, ()> {
+    io.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,18 +63,27 @@ impl SessionLease {
                 cwd: cwd.map(Path::to_path_buf),
                 updated_at_millis: now_millis(),
             },
+            io: Arc::default(),
         };
         lease.refresh()?;
         Ok(lease)
     }
 
     pub fn refresh(&mut self) -> Result<()> {
+        let _io = lock(&self.io);
         self.record.updated_at_millis = now_millis();
         write_record_atomic(&self.path, &self.record)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn remover(&self) -> LeaseRemover {
+        LeaseRemover {
+            path: self.path.clone(),
+            io: self.io.clone(),
+        }
     }
 }
 
